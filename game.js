@@ -9,10 +9,11 @@
   // ═══════════════════════════════════════════════════════════
   // CONSTANTS
   // ═══════════════════════════════════════════════════════════
-  const SAVE_KEY = "ashenvale_save_v1";
+  const SAVE_KEY = "ashenvale_save_v2";
+  const SAVE_KEY_LEGACY = "ashenvale_save_v1";
   const WORLD_W = 2400;
   const WORLD_H = 2400;
-  const TILE = 40;
+  const TILE = 32;
   const PLAYER_R = 14;
   const ZOMBIE_R = 13;
   const ATTACK_RANGE = 52;
@@ -24,8 +25,23 @@
   const AGRO_RANGE = 160;
   const MAX_INV = 16;
 
-  const SKILL_NAMES = ["combat", "foraging", "crafting", "fitness"];
-  const SKILL_LABELS = { combat: "Combat", foraging: "Foraging", crafting: "Crafting", fitness: "Fitness" };
+  const SKILL_NAMES = ["combat", "foraging", "crafting", "fitness", "construction"];
+  const SKILL_LABELS = { combat: "Combat", foraging: "Foraging", crafting: "Crafting", fitness: "Fitness", construction: "Construction" };
+
+  const BUILDING_TYPES = {
+    none: { name: "Unclaimed", desc: "Claim to designate a use." },
+    safehouse: { name: "Safehouse", desc: "Respawn here. Slow heal inside.", skill: 1 },
+    workshop: { name: "Workshop", desc: "Unlocks advanced craft recipes.", skill: 2 },
+    storage: { name: "Storage", desc: "Stash persists through death.", skill: 2 },
+    kitchen: { name: "Kitchen", desc: "Cook hearty stew from berries.", skill: 3 },
+  };
+
+  const FORTIFY = {
+    board: { label: "Board windows", need: { plank: 2, nails: 2 }, skill: 1, xp: 18, addWall: 40 },
+    door:  { label: "Reinforce door", need: { plank: 3, nails: 4 }, skill: 2, xp: 28, addWall: 60 },
+    walls: { label: "Brace walls", need: { plank: 4, nails: 6 }, skill: 3, xp: 40, addWall: 80 },
+    repair:{ label: "Repair fortifications", need: { plank: 1, nails: 1 }, skill: 1, xp: 10, repair: 35 },
+  };
 
   const ITEM_DEFS = {
     wood:      { name: "Wood", stack: 20, type: "mat" },
@@ -42,10 +58,13 @@
   };
 
   const RECIPES = [
+    { id: "plank", out: { id: "plank", qty: 2 }, need: { wood: 1 }, skill: 1, xp: 6 },
+    { id: "nails", out: { id: "nails", qty: 4 }, need: { scrap: 1 }, skill: 1, xp: 8 },
     { id: "bandage", out: { id: "bandage", qty: 1 }, need: { cloth: 2 }, skill: 1, xp: 12 },
-    { id: "spear", out: { id: "spear", qty: 1 }, need: { stick: 2, knife: 1 }, keep: ["knife"], skill: 2, xp: 25 },
-    { id: "bat", out: { id: "bat", qty: 1 }, need: { wood: 3, scrap: 2 }, skill: 4, xp: 40 },
     { id: "stick", out: { id: "stick", qty: 2 }, need: { wood: 1 }, skill: 1, xp: 6 },
+    { id: "spear", out: { id: "spear", qty: 1 }, need: { stick: 2, knife: 1 }, keep: ["knife"], skill: 2, xp: 25 },
+    { id: "bat", out: { id: "bat", qty: 1 }, need: { wood: 3, scrap: 2 }, skill: 4, xp: 40, workshop: true },
+    { id: "stew", out: { id: "stew", qty: 1 }, need: { berries: 3, water: 1 }, skill: 1, xp: 15, kitchen: true },
   ];
 
   // ═══════════════════════════════════════════════════════════
@@ -58,7 +77,11 @@
     day: 1,
     dayTimer: 0,
     cam: { x: 0, y: 0 },
+    viewW: 390,
+    viewH: 500,
     player: null,
+    tapMarkers: [],
+    msgLog: [],
     zombies: [],
     props: [],       // trees, bushes, crates, buildings (static + gatherable)
     lootPiles: [],   // ground loot / death drops
@@ -83,7 +106,7 @@
   }
 
   function createPlayer(x, y, keepSkills) {
-    const skills = keepSkills || emptySkills();
+    const skills = keepSkills ? migrateSkills(keepSkills) : emptySkills();
     return {
       x, y,
       vx: 0, vy: 0,
@@ -99,6 +122,8 @@
         { id: "knife", qty: 1 },
         { id: "berries", qty: 3 },
         { id: "bandage", qty: 1 },
+        { id: "plank", qty: 2 },
+        { id: "nails", qty: 4 },
       ],
       skills,
       kills: 0,
@@ -122,6 +147,32 @@
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function pointInBuilding(x, y, b) {
+    return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  }
+  function buildingCenter(b) { return { x: b.x + b.w / 2, y: b.y + b.h / 2 }; }
+  function defaultBase() {
+    return { claimed: false, type: "none", wallHp: 0, wallMax: 0, boarded: false, doorReinforced: false, braced: false, stash: [] };
+  }
+  function migrateSkills(skills) {
+    const base = emptySkills();
+    if (!skills) return base;
+    for (const n of SKILL_NAMES) {
+      if (skills[n]) base[n] = { level: skills[n].level || 1, xp: skills[n].xp || 0, next: skills[n].next || xpToNext(skills[n].level || 1) };
+    }
+    return base;
+  }
+  function buildingsList() { return state.props.filter((p) => p.kind === "building"); }
+  function buildingAt(x, y) {
+    for (const b of buildingsList()) if (pointInBuilding(x, y, b)) return b;
+    return null;
+  }
+  function playerBuilding() { return state.player ? buildingAt(state.player.x, state.player.y) : null; }
+  function hasWorkshop() { return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop"); }
+  function hasKitchen() { return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "kitchen"); }
+  function getSafehouse() { return buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "safehouse"); }
+  function getStorageBuilding() { return buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "storage"); }
 
   function invCount(inv, id) {
     let n = 0;
@@ -212,7 +263,7 @@
       { x: cx - 420, y: cy + 80, w: 110, h: 90 },
     ];
     for (const b of buildings) {
-      props.push({ kind: "building", x: b.x, y: b.y, w: b.w, h: b.h, solid: true });
+      props.push({ kind: "building", x: b.x, y: b.y, w: b.w, h: b.h, solid: true, base: defaultBase() });
       // crates near buildings
       const nCrates = 1 + Math.floor(rnd() * 2);
       for (let i = 0; i < nCrates; i++) {
@@ -252,7 +303,7 @@
     // Starter loot near camp
     lootPiles.push({
       x: cx + 40, y: cy - 30,
-      items: [{ id: "cloth", qty: 2 }, { id: "water", qty: 1 }],
+      items: [{ id: "cloth", qty: 2 }, { id: "water", qty: 1 }, { id: "plank", qty: 2 }],
       life: 99999,
     });
 
@@ -283,6 +334,8 @@
       [{ id: "canned", qty: 1 }],
       [{ id: "cloth", qty: 2 }],
       [{ id: "scrap", qty: 2 }],
+      [{ id: "nails", qty: 3 }],
+      [{ id: "plank", qty: 2 }],
       [{ id: "bandage", qty: 1 }],
       [{ id: "water", qty: 1 }, { id: "berries", qty: 2 }],
       [{ id: "wood", qty: 3 }],
@@ -313,7 +366,7 @@
   // ═══════════════════════════════════════════════════════════
   function serialize() {
     return {
-      v: 1,
+      v: 2,
       seed: state.seed,
       day: state.day,
       dayTimer: state.dayTimer,
@@ -333,43 +386,69 @@
       props: state.props.map((p) => ({
         kind: p.kind, x: p.x, y: p.y, w: p.w, h: p.h, r: p.r,
         solid: p.solid, hp: p.hp, gathered: p.gathered, loot: p.loot,
+        base: p.base || null,
       })),
       lootPiles: state.lootPiles,
       tutorialShown: state.tutorialShown,
     };
   }
 
-  function saveGame() {
+  function normalizeLoadedProps(props) {
+    return (props || []).map((p) => {
+      const out = Object.assign({}, p);
+      if (out.kind === "building") {
+        out.base = Object.assign(defaultBase(), out.base || {});
+        if (!Array.isArray(out.base.stash)) out.base.stash = [];
+      }
+      return out;
+    });
+  }
+
+  function saveGame(silent) {
     if (!state.player) return;
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify(serialize()));
-      toast("Game saved");
+      try { localStorage.removeItem(SAVE_KEY_LEGACY); } catch (e2) { /* ignore */ }
+      if (!silent) toast("Game saved");
     } catch (e) {
       toast("Save failed (storage full?)");
     }
   }
 
+  function loadRaw() {
+    try {
+      let raw = localStorage.getItem(SAVE_KEY);
+      if (raw) return JSON.parse(raw);
+      raw = localStorage.getItem(SAVE_KEY_LEGACY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      data.v = 2;
+      if (data.player) data.player.skills = migrateSkills(data.player.skills);
+      data.props = normalizeLoadedProps(data.props);
+      return data;
+    } catch (e) { return null; }
+  }
+
   function loadGame() {
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return false;
-      const data = JSON.parse(raw);
-      if (!data || data.v !== 1) return false;
+      const data = loadRaw();
+      if (!data || !data.player) return false;
       state.seed = data.seed;
-      state.day = data.day;
-      state.dayTimer = data.dayTimer;
+      state.day = data.day || 1;
+      state.dayTimer = data.dayTimer || 0;
       state.time = data.time || 0;
       state.tutorialShown = !!data.tutorialShown;
-      state.props = data.props || [];
+      state.props = normalizeLoadedProps(data.props);
       state.lootPiles = data.lootPiles || [];
-      state.zombies = (data.zombies || []).map((z) => ({
-        ...makeZombie(z.x, z.y),
-        id: z.id, hp: z.hp, speed: z.speed, alive: true,
-      }));
+      state.zombies = (data.zombies || []).map((z) => {
+        const zz = makeZombie(z.x, z.y);
+        zz.id = z.id; zz.hp = z.hp; zz.speed = z.speed; zz.alive = true;
+        return zz;
+      });
       const p = createPlayer(data.player.x, data.player.y, data.player.skills);
       Object.assign(p, {
         hp: data.player.hp,
-        maxHp: data.player.maxHp,
+        maxHp: data.player.maxHp || 100,
         hunger: data.player.hunger,
         weapon: data.player.weapon,
         inv: data.player.inv || [],
@@ -378,6 +457,7 @@
       state.player = p;
       state.particles = [];
       state.floatTexts = [];
+      state.tapMarkers = [];
       return true;
     } catch (e) {
       return false;
@@ -385,11 +465,14 @@
   }
 
   function hasSave() {
-    try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; }
+    try { return !!(localStorage.getItem(SAVE_KEY) || localStorage.getItem(SAVE_KEY_LEGACY)); } catch (e) { return false; }
   }
 
   function resetSave() {
-    try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ }
+    try {
+      localStorage.removeItem(SAVE_KEY);
+      localStorage.removeItem(SAVE_KEY_LEGACY);
+    } catch (e) { /* ignore */ }
   }
 
   function startNewGame() {
@@ -405,11 +488,67 @@
     state.time = 0;
     state.particles = [];
     state.floatTexts = [];
+    state.tapMarkers = [];
     state.deathTimer = 0;
     state.tutorialShown = false;
     state.running = true;
     state.paused = false;
-    saveGame();
+    saveGame(true);
+  }
+
+
+  function canAfford(need) {
+    return Object.keys(need).every((id) => invCount(state.player.inv, id) >= need[id]);
+  }
+  function payNeed(need) {
+    for (const [id, q] of Object.entries(need)) invRemove(state.player.inv, id, q);
+  }
+  function claimBuilding(b) {
+    if (!b || b.kind !== "building") return false;
+    if (!pointInBuilding(state.player.x, state.player.y, b)) { toast("Stand inside to claim"); return false; }
+    if (b.base.claimed) { toast("Already claimed"); return false; }
+    b.base.claimed = true; b.base.type = "none"; b.base.wallHp = 20; b.base.wallMax = 20;
+    gainXp(state.player, "construction", 15);
+    toast("Building claimed — choose a type");
+    saveGame(true);
+    return true;
+  }
+  function setBuildingType(b, type) {
+    const def = BUILDING_TYPES[type];
+    if (!b || !b.base || !b.base.claimed || !def || type === "none") return false;
+    if (state.player.skills.construction.level < (def.skill || 1)) { toast("Need Construction " + def.skill); return false; }
+    for (const other of buildingsList()) {
+      if (other !== b && other.base && other.base.type === type) { toast("You already have a " + def.name); return false; }
+    }
+    b.base.type = type;
+    gainXp(state.player, "construction", 20);
+    toast("Designated as " + def.name);
+    saveGame(true);
+    return true;
+  }
+  function doFortify(b, key) {
+    const f = FORTIFY[key];
+    if (!f || !b || !b.base || !b.base.claimed) return false;
+    const p = state.player;
+    if (p.skills.construction.level < f.skill) { toast("Need Construction " + f.skill); return false; }
+    if (!canAfford(f.need)) { toast("Need more planks/nails"); return false; }
+    if (key === "board" && b.base.boarded) { toast("Windows already boarded"); return false; }
+    if (key === "door" && b.base.doorReinforced) { toast("Door already reinforced"); return false; }
+    if (key === "walls" && b.base.braced) { toast("Walls already braced"); return false; }
+    if (key === "repair" && b.base.wallHp >= b.base.wallMax) { toast("Already at full fort HP"); return false; }
+    payNeed(f.need);
+    if (f.repair) b.base.wallHp = Math.min(b.base.wallMax, b.base.wallHp + f.repair);
+    else {
+      if (key === "board") b.base.boarded = true;
+      if (key === "door") b.base.doorReinforced = true;
+      if (key === "walls") b.base.braced = true;
+      b.base.wallMax += f.addWall;
+      b.base.wallHp = Math.min(b.base.wallMax, b.base.wallHp + f.addWall);
+    }
+    gainXp(p, "construction", f.xp);
+    toast(f.label + " done");
+    saveGame(true);
+    return true;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -446,6 +585,10 @@
       p.hp -= 2.5 * dt;
     } else if (p.hunger > 60 && p.hp < p.maxHp) {
       p.hp = Math.min(p.maxHp, p.hp + 1.2 * dt);
+    }
+    const insideB = playerBuilding();
+    if (insideB && insideB.base && insideB.base.type === "safehouse" && insideB.base.wallHp > 0) {
+      p.hp = Math.min(p.maxHp, p.hp + 3.5 * dt);
     }
 
     p.attackCd = Math.max(0, p.attackCd - dt);
@@ -508,33 +651,54 @@
     // Resolve player position vs solids
     resolveSolid(p);
 
-    // Zombies
+    // Zombies — attack nearby fortifications, else chase player
     for (const z of state.zombies) {
       if (!z.alive) continue;
       z.hitFlash = Math.max(0, z.hitFlash - dt);
       z.attackCd = Math.max(0, z.attackCd - dt);
       const d = dist(z, p);
-      if (d < AGRO_RANGE) {
+      let fort = null, fortDist = 9999;
+      for (const b of buildingsList()) {
+        if (!b.base || !b.base.claimed || b.base.wallHp <= 0) continue;
+        const c = buildingCenter(b);
+        if (dist(p, c) > 220) continue;
+        const fd = dist(z, c);
+        if (fd < fortDist) { fortDist = fd; fort = b; }
+      }
+      if (fort && fortDist < AGRO_RANGE + 40 && d > 70) {
+        const door = { x: fort.x + fort.w / 2, y: fort.y + fort.h + 4 };
+        if (dist(z, door) > 18) moveToward(z, door.x, door.y, z.speed, dt);
+        else if (z.attackCd <= 0) {
+          z.attackCd = 1.0;
+          const dmg = 4 + Math.floor(Math.random() * 4);
+          fort.base.wallHp = Math.max(0, fort.base.wallHp - dmg);
+          floatText(door.x, door.y - 10, `-${dmg}`, "#e0b45a");
+          if (fort.base.wallHp <= 0) toast("Barricade broken!");
+        }
+      } else if (d < AGRO_RANGE) {
         moveToward(z, p.x, p.y, z.speed, dt);
         if (d < z.r + p.r + 4 && z.attackCd <= 0) {
-          z.attackCd = 1.1;
-          const dmg = 6 + Math.floor(Math.random() * 5);
-          p.hp -= dmg;
-          floatText(p.x, p.y - 20, `-${dmg}`, "#e05a5a");
-          burst(p.x, p.y, "#e05a5a", 6);
-          if (p.hp <= 0) {
-            playerDie();
-            break;
+          const ib = playerBuilding();
+          if (ib && ib.base && ib.base.claimed && ib.base.wallHp > 0) {
+            z.attackCd = 1.1;
+            const dmg = 3 + Math.floor(Math.random() * 3);
+            ib.base.wallHp = Math.max(0, ib.base.wallHp - dmg);
+            floatText(ib.x + ib.w / 2, ib.y, `wall -${dmg}`, "#e0b45a");
+          } else {
+            z.attackCd = 1.1;
+            const dmg = 6 + Math.floor(Math.random() * 5);
+            p.hp -= dmg;
+            floatText(p.x, p.y - 20, `-${dmg}`, "#e05a5a");
+            burst(p.x, p.y, "#e05a5a", 6);
+            if (p.hp <= 0) { playerDie(); break; }
           }
         }
       } else {
         z.wanderT -= dt;
         if (z.wanderT <= 0) {
           z.wanderT = 2 + Math.random() * 3;
-          z.wx = z.x + (Math.random() - 0.5) * 120;
-          z.wy = z.y + (Math.random() - 0.5) * 120;
-          z.wx = clamp(z.wx, 40, WORLD_W - 40);
-          z.wy = clamp(z.wy, 40, WORLD_H - 40);
+          z.wx = clamp(z.x + (Math.random() - 0.5) * 120, 40, WORLD_W - 40);
+          z.wy = clamp(z.y + (Math.random() - 0.5) * 120, 40, WORLD_H - 40);
         }
         moveToward(z, z.wx, z.wy, z.speed * 0.35, dt);
       }
@@ -556,6 +720,10 @@
       ft.y -= 20 * dt;
       if (ft.life <= 0) state.floatTexts.splice(i, 1);
     }
+    for (let i = state.tapMarkers.length - 1; i >= 0; i--) {
+      state.tapMarkers[i].life -= dt;
+      if (state.tapMarkers[i].life <= 0) state.tapMarkers.splice(i, 1);
+    }
 
     if (state.toastTimer > 0) {
       state.toastTimer -= dt;
@@ -566,7 +734,7 @@
 
     // Autosave every ~20s
     if (Math.floor(state.time / 20) !== Math.floor((state.time - dt) / 20)) {
-      try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialize())); } catch (e) { /* ignore */ }
+      saveGame(true);
     }
 
     updateHud();
@@ -594,31 +762,8 @@
     for (const prop of state.props) {
       if (!prop.solid) continue;
       if (prop.kind === "building") {
-        // AABB vs circle push-out
-        const nearestX = clamp(ent.x, prop.x, prop.x + prop.w);
-        const nearestY = clamp(ent.y, prop.y, prop.y + prop.h);
-        const dx = ent.x - nearestX;
-        const dy = ent.y - nearestY;
-        const d2 = dx * dx + dy * dy;
-        const r = ent.r;
-        if (d2 < r * r) {
-          if (d2 === 0) {
-            // center inside — push to nearest edge
-            const left = ent.x - prop.x;
-            const right = prop.x + prop.w - ent.x;
-            const top = ent.y - prop.y;
-            const bottom = prop.y + prop.h - ent.y;
-            const m = Math.min(left, right, top, bottom);
-            if (m === left) ent.x = prop.x - r;
-            else if (m === right) ent.x = prop.x + prop.w + r;
-            else if (m === top) ent.y = prop.y - r;
-            else ent.y = prop.y + prop.h + r;
-          } else {
-            const d = Math.sqrt(d2);
-            ent.x = nearestX + (dx / d) * r;
-            ent.y = nearestY + (dy / d) * r;
-          }
-        }
+        // Enterable interiors; fortification is HP-based, not a physics wall.
+        continue;
       } else if (prop.r) {
         const d = dist(ent, prop);
         const minD = ent.r + prop.r * 0.7;
@@ -704,6 +849,7 @@
       prop.hp -= 1;
       invAdd(p.inv, "scrap", 1);
       if (Math.random() < 0.2) invAdd(p.inv, "cloth", 1);
+      if (Math.random() < 0.25) invAdd(p.inv, "nails", 1);
       floatText(prop.x, prop.y - 16, "+scrap", "#9aa0a8");
       gainXp(p, "foraging", 5);
       if (prop.hp <= 0) {
@@ -754,13 +900,16 @@
     state.deathTimer = 2.8;
     document.getElementById("death-banner").classList.add("show");
     toast("You died — skills kept, gear dropped");
-    try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialize())); } catch (e) { /* ignore */ }
+    saveGame(true);
   }
 
   function respawnPlayer() {
+    const safe = getSafehouse();
     const camp = state.props.find((pr) => pr.kind === "campfire");
-    const sx = camp ? camp.x : WORLD_W / 2;
-    const sy = camp ? camp.y + 40 : WORLD_H / 2;
+    let sx, sy;
+    if (safe) { sx = safe.x + safe.w / 2; sy = safe.y + safe.h / 2; }
+    else if (camp) { sx = camp.x; sy = camp.y + 40; }
+    else { sx = WORLD_W / 2; sy = WORLD_H / 2; }
     const skills = state.player.skills;
     const kills = state.player.kills;
     const maxHp = state.player.maxHp;
@@ -770,8 +919,8 @@
     state.player.hp = Math.min(60, maxHp);
     state.player.hunger = 55;
     state.player.inv = [{ id: "berries", qty: 1 }];
-    toast("Back at the campfire. Recover your gear if you can.");
-    saveGame();
+    toast(safe ? "Respawned at Safehouse" : "Back at the campfire. Recover your gear if you can.");
+    saveGame(true);
   }
 
   function spawnNightZombies() {
@@ -821,13 +970,24 @@
   const ctx = canvas.getContext("2d");
   const mctx = minimap.getContext("2d");
 
+  /**
+   * Screen→world in CSS/logical pixels (matches ctx.setTransform(dpr) draw space).
+   * Do NOT multiply by canvas.width/height (backing store) — that double-applies DPR.
+   */
+  function clientToWorld(clientX, clientY, rect, cam, viewW, viewH) {
+    const rw = rect.width || 1;
+    const rh = rect.height || 1;
+    const vw = viewW || rw;
+    const vh = viewH || rh;
+    return {
+      x: ((clientX - rect.left) / rw) * vw + cam.x,
+      y: ((clientY - rect.top) / rh) * vh + cam.y,
+    };
+  }
+
   function canvasToWorld(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
-    const sx = canvas.width / rect.width;
-    const sy = canvas.height / rect.height;
-    const mx = (clientX - rect.left) * sx;
-    const my = (clientY - rect.top) * sy;
-    return { x: mx + state.cam.x, y: my + state.cam.y };
+    return clientToWorld(clientX, clientY, rect, state.cam, state.viewW, state.viewH);
   }
 
   function onTap(clientX, clientY) {
@@ -836,12 +996,15 @@
     if (!p || !p.alive) return;
     const w = canvasToWorld(clientX, clientY);
 
-    // Zombie first
-    let bestZ = null, bestZd = ATTACK_RANGE + 40;
+    // Tap marker so player sees registered world point
+    state.tapMarkers.push({ x: w.x, y: w.y, life: 0.55 });
+
+    // Zombie first — generous hit pad for fat-finger taps
+    let bestZ = null, bestZd = 40;
     for (const z of state.zombies) {
       if (!z.alive) continue;
       const d = Math.hypot(z.x - w.x, z.y - w.y);
-      if (d < z.r + 18 && d < bestZd) { bestZ = z; bestZd = d; }
+      if (d < z.r + 28 && d < bestZd) { bestZ = z; bestZd = d; }
     }
     if (bestZ) {
       p.target = { zombieId: bestZ.id };
@@ -851,14 +1014,14 @@
     // Loot piles
     for (let i = 0; i < state.lootPiles.length; i++) {
       const pile = state.lootPiles[i];
-      if (Math.hypot(pile.x - w.x, pile.y - w.y) < 22) {
+      if (Math.hypot(pile.x - w.x, pile.y - w.y) < 28) {
         p.target = { lootId: i };
         return;
       }
     }
 
     // Gatherables
-    let bestP = -1, bestPd = GATHER_RANGE + 30;
+    let bestP = -1, bestPd = 46;
     for (let i = 0; i < state.props.length; i++) {
       const prop = state.props[i];
       if (prop.kind === "building" || prop.kind === "campfire") continue;
@@ -866,7 +1029,7 @@
       if (prop.gathered) continue;
       const c = propCenter(prop);
       const d = Math.hypot(c.x - w.x, c.y - w.y);
-      const hitR = prop.r ? prop.r + 14 : 20;
+      const hitR = prop.r ? prop.r + 22 : 28;
       if (d < hitR && d < bestPd) { bestP = i; bestPd = d; }
     }
     if (bestP >= 0) {
@@ -883,18 +1046,23 @@
 
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    canvas.setPointerCapture(e.pointerId);
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     onTap(e.clientX, e.clientY);
   }, { passive: false });
+  canvas.addEventListener("touchstart", (e) => { e.preventDefault(); }, { passive: false });
+  canvas.addEventListener("gesturestart", (e) => { e.preventDefault(); }, { passive: false });
 
   // ═══════════════════════════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════════════════════════
   function resize() {
     const wrap = document.getElementById("canvas-wrap");
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = wrap.clientWidth;
-    const h = wrap.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const w = Math.max(1, wrap.clientWidth);
+    const h = Math.max(1, wrap.clientHeight);
+    state.viewW = w;
+    state.viewH = h;
     canvas.width = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
     canvas.style.width = w + "px";
@@ -921,11 +1089,10 @@
   }
 
   function render() {
-    const wrap = document.getElementById("canvas-wrap");
-    const vw = wrap.clientWidth;
-    const vh = wrap.clientHeight;
+    const vw = state.viewW;
+    const vh = state.viewH;
     if (!state.player) {
-      ctx.fillStyle = "#1a2a22";
+      ctx.fillStyle = "#3a5a28";
       ctx.fillRect(0, 0, vw, vh);
       return;
     }
@@ -936,22 +1103,23 @@
     const cam = state.cam;
     const light = dayFactor();
 
-    // Ground
-    ctx.fillStyle = `rgb(${22 + light * 18 | 0},${40 + light * 28 | 0},${30 + light * 16 | 0})`;
-    ctx.fillRect(0, 0, vw, vh);
-
-    // Grass patches (deterministic-ish by tile)
-    const t0x = Math.floor(cam.x / TILE);
-    const t0y = Math.floor(cam.y / TILE);
-    const t1x = Math.ceil((cam.x + vw) / TILE);
-    const t1y = Math.ceil((cam.y + vh) / TILE);
+    // Chunky grass/dirt/stone tiles (RSC-inspired original)
+    const t0x = Math.floor(cam.x / TILE) - 1;
+    const t0y = Math.floor(cam.y / TILE) - 1;
+    const t1x = Math.ceil((cam.x + vw) / TILE) + 1;
+    const t1y = Math.ceil((cam.y + vh) / TILE) + 1;
     for (let ty = t0y; ty <= t1y; ty++) {
       for (let tx = t0x; tx <= t1x; tx++) {
         const h = ((tx * 73856093) ^ (ty * 19349663) ^ state.seed) >>> 0;
-        if ((h & 7) === 0) {
-          ctx.fillStyle = `rgba(40, ${70 + (h % 40)}, 45, ${0.15 + light * 0.15})`;
-          ctx.fillRect(tx * TILE - cam.x + (h % 12), ty * TILE - cam.y + ((h >> 4) % 12), 10, 6);
-        }
+        const kind = h % 7;
+        let r, g, b;
+        if (kind < 4) { r = 40 + (h % 20); g = (90 + light * 40 + (h % 25)) | 0; b = 35; }
+        else if (kind < 6) { r = 90 + (h % 20); g = 70 + (h % 15); b = 40; }
+        else { r = 110; g = 105; b = 85; }
+        ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+        ctx.fillRect(tx * TILE - cam.x, ty * TILE - cam.y, TILE, TILE);
+        ctx.strokeStyle = "rgba(0,0,0,0.08)";
+        ctx.strokeRect(tx * TILE - cam.x + 0.5, ty * TILE - cam.y + 0.5, TILE - 1, TILE - 1);
       }
     }
 
@@ -1008,6 +1176,20 @@
       ctx.stroke();
     }
 
+    // Tap registration markers
+    for (const tm of state.tapMarkers) {
+      const a = Math.max(0, tm.life / 0.55);
+      ctx.beginPath();
+      ctx.arc(tm.x - cam.x, tm.y - cam.y, 10 + (1 - a) * 8, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(232,200,96,${a})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(tm.x - cam.x, tm.y - cam.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(232,200,96,${a})`;
+      ctx.fill();
+    }
+
     // Particles
     for (const pt of state.particles) {
       ctx.globalAlpha = Math.max(0, pt.life * 2);
@@ -1047,23 +1229,64 @@
 
     if (prop.kind === "building") {
       const sx = prop.x - cam.x, sy = prop.y - cam.y;
-      if (sx + prop.w < 0 || sy + prop.h < 0 || sx > vw || sy > vh) return;
-      ctx.fillStyle = `rgb(${55 + light * 20 | 0},${48 + light * 10 | 0},${42})`;
+      if (sx + prop.w < -40 || sy + prop.h < -40 || sx > vw + 40 || sy > vh + 40) return;
+      // stone floor
+      ctx.fillStyle = "#6a6050";
       ctx.fillRect(sx, sy, prop.w, prop.h);
-      ctx.strokeStyle = "#2a221c";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(sx, sy, prop.w, prop.h);
-      // roof hatch
-      ctx.fillStyle = `rgba(80,40,35,${0.35 + light * 0.2})`;
+      // timber frame walls
+      ctx.fillStyle = "#5a4030";
+      ctx.fillRect(sx, sy, prop.w, 10);
+      ctx.fillRect(sx, sy + prop.h - 10, prop.w, 10);
+      ctx.fillRect(sx, sy, 10, prop.h);
+      ctx.fillRect(sx + prop.w - 10, sy, 10, prop.h);
+      ctx.strokeStyle = "#3a2a18";
+      ctx.lineWidth = 1;
+      for (let yy = 12; yy < prop.h - 12; yy += 10) {
+        for (let xx = 12; xx < prop.w - 12; xx += 16) ctx.strokeRect(sx + xx, sy + yy, 14, 8);
+      }
+      // red roof
+      ctx.fillStyle = "#7a3030";
       ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(sx + prop.w / 2, sy - 18);
-      ctx.lineTo(sx + prop.w, sy);
+      ctx.moveTo(sx - 4, sy + 4);
+      ctx.lineTo(sx + prop.w / 2, sy - 22);
+      ctx.lineTo(sx + prop.w + 4, sy + 4);
       ctx.closePath();
       ctx.fill();
+      ctx.strokeStyle = "#1a1208";
+      ctx.lineWidth = 2;
+      ctx.stroke();
       // door
-      ctx.fillStyle = "#3a3028";
-      ctx.fillRect(sx + prop.w / 2 - 10, sy + prop.h - 28, 20, 28);
+      ctx.fillStyle = "#4a3a28";
+      ctx.fillRect(sx + prop.w / 2 - 12, sy + prop.h - 10, 24, 10);
+      const winColor = (prop.base && prop.base.boarded) ? "#5a4028" : "#80a0c0";
+      ctx.fillStyle = winColor;
+      ctx.fillRect(sx + 18, sy + 28, 16, 14);
+      ctx.fillRect(sx + prop.w - 34, sy + 28, 16, 14);
+      ctx.strokeStyle = "#1a1208";
+      ctx.strokeRect(sx + 18, sy + 28, 16, 14);
+      ctx.strokeRect(sx + prop.w - 34, sy + 28, 16, 14);
+      if (prop.base && prop.base.boarded) {
+        ctx.beginPath();
+        ctx.moveTo(sx + 18, sy + 28); ctx.lineTo(sx + 34, sy + 42);
+        ctx.moveTo(sx + 34, sy + 28); ctx.lineTo(sx + 18, sy + 42);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = "#1a1208";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(sx, sy, prop.w, prop.h);
+      if (prop.base && prop.base.claimed) {
+        const label = (BUILDING_TYPES[prop.base.type] && BUILDING_TYPES[prop.base.type].name) || "Claimed";
+        ctx.fillStyle = "#e8c860";
+        ctx.font = "bold 11px Georgia";
+        ctx.textAlign = "center";
+        ctx.fillText(label, sx + prop.w / 2, sy - 28);
+        if (prop.base.wallMax > 0) {
+          ctx.fillStyle = "#1a1208";
+          ctx.fillRect(sx + 10, sy + prop.h + 4, prop.w - 20, 5);
+          ctx.fillStyle = "#6aaa40";
+          ctx.fillRect(sx + 10, sy + prop.h + 4, (prop.w - 20) * (prop.base.wallHp / prop.base.wallMax), 5);
+        }
+      }
       return;
     }
 
@@ -1153,60 +1376,38 @@
   }
 
   function drawPlayer(sx, sy, p) {
-    // shadow
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + 10, 12, 5, 0, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(0,0,0,0.25)";
-    ctx.fill();
-    // body
-    ctx.beginPath();
-    ctx.arc(sx, sy, p.r, 0, Math.PI * 2);
-    ctx.fillStyle = "#4a8f6a";
-    ctx.fill();
-    ctx.strokeStyle = "#2e5c44";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    // face direction
-    const fx = Math.cos(p.facing) * 8;
-    const fy = Math.sin(p.facing) * 8;
-    ctx.beginPath();
-    ctx.arc(sx + fx, sy + fy, 4, 0, Math.PI * 2);
-    ctx.fillStyle = "#dce8e0";
-    ctx.fill();
-    // weapon hint
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath(); ctx.ellipse(sx, sy + 11, 11, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#3a6a4a";
+    ctx.beginPath(); ctx.arc(sx, sy, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.fillStyle = "#d2b48c";
+    ctx.beginPath(); ctx.arc(sx, sy - 8, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.stroke();
+    const fx = Math.cos(p.facing) * 7;
+    const fy = Math.sin(p.facing) * 7;
     if (p.weapon) {
-      ctx.strokeStyle = "#c9c0a0";
-      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#c9c0a0"; ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(sx + fx * 0.5, sy + fy * 0.5);
-      ctx.lineTo(sx + fx * 2.2, sy + fy * 2.2);
+      ctx.moveTo(sx + fx * 0.4, sy + fy * 0.4);
+      ctx.lineTo(sx + fx * 2.4, sy + fy * 2.4);
       ctx.stroke();
     }
   }
 
   function drawZombie(sx, sy, z) {
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + 9, 11, 4, 0, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(0,0,0,0.22)";
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(sx, sy, z.r, 0, Math.PI * 2);
-    ctx.fillStyle = z.hitFlash > 0 ? "#c8e0a0" : "#5a7a48";
-    ctx.fill();
-    ctx.strokeStyle = "#2a3a22";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    // eyes
-    ctx.fillStyle = "#e05a5a";
-    ctx.beginPath();
-    ctx.arc(sx - 4, sy - 3, 2.2, 0, Math.PI * 2);
-    ctx.arc(sx + 4, sy - 3, 2.2, 0, Math.PI * 2);
-    ctx.fill();
-    // hp pip
-    if (z.hp < z.maxHp) {
-      ctx.fillStyle = "#1a1810";
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath(); ctx.ellipse(sx, sy + 10, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = z.hitFlash > 0 ? "#c8e0a0" : "#5a7a40";
+    ctx.beginPath(); ctx.arc(sx, sy, z.r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.fillStyle = "#c04040";
+    ctx.fillRect(sx - 5, sy - 5, 3, 3);
+    ctx.fillRect(sx + 2, sy - 5, 3, 3);
+    if (z.hp < 40) {
+      ctx.fillStyle = "#1a1208";
       ctx.fillRect(sx - 12, sy - 22, 24, 4);
-      ctx.fillStyle = "#e05a5a";
+      ctx.fillStyle = "#c04040";
       ctx.fillRect(sx - 12, sy - 22, 24 * clamp(z.hp / 40, 0, 1), 4);
     }
   }
@@ -1218,7 +1419,7 @@
     mctx.fillRect(0, 0, 72, 72);
     for (const prop of state.props) {
       if (prop.kind === "building") {
-        mctx.fillStyle = "#5a4838";
+        mctx.fillStyle = (prop.base && prop.base.claimed) ? "#e8c860" : "#6a5438";
         mctx.fillRect(prop.x * s, prop.y * s, Math.max(2, prop.w * s), Math.max(2, prop.h * s));
       } else if (prop.kind === "campfire") {
         mctx.fillStyle = "#e0a040";
@@ -1276,25 +1477,40 @@
   function renderInventory() {
     const grid = document.getElementById("inv-grid");
     const inv = state.player ? state.player.inv : [];
-    if (!inv.length) {
-      grid.innerHTML = "<p>Bag is empty. Scavenge crates, trees, and bushes.</p>";
-      return;
+    let html = "";
+    if (!inv.length) html = "<p>Bag is empty. Scavenge crates, trees, and bushes.</p>";
+    else {
+      html = inv.map((it, i) => {
+        const def = ITEM_DEFS[it.id] || { name: it.id };
+        const eq = state.player.weapon === it.id ? " · equipped" : "";
+        const sel = state.selectedInv === i ? " selected" : "";
+        return `<button type="button" class="inv-item${sel}" data-idx="${i}">
+          <span class="name">${def.name} ×${it.qty}</span>
+          <span class="meta">${def.type}${eq}</span>
+        </button>`;
+      }).join("");
     }
-    grid.innerHTML = inv.map((it, i) => {
-      const def = ITEM_DEFS[it.id] || { name: it.id };
-      const eq = state.player.weapon === it.id ? " · equipped" : "";
-      const sel = state.selectedInv === i ? " selected" : "";
-      return `<button type="button" class="inv-item${sel}" data-idx="${i}">
-        <span class="name">${def.name} ×${it.qty}</span>
-        <span class="meta">${def.type}${eq}</span>
-      </button>`;
-    }).join("");
+    const storage = getStorageBuilding();
+    if (storage && pointInBuilding(state.player.x, state.player.y, storage)) {
+      const stash = storage.base.stash || [];
+      html += '<p style="margin-top:10px"><strong>Storage stash</strong> (survives death)</p>';
+      html += '<div class="panel-actions"><button class="btn" type="button" id="btn-stash-dep">Deposit mats/food</button>' +
+        '<button class="btn" type="button" id="btn-stash-wd">Withdraw all</button></div>';
+      html += stash.length
+        ? '<p>' + stash.map((s) => (ITEM_DEFS[s.id] ? ITEM_DEFS[s.id].name : s.id) + "×" + s.qty).join(", ") + "</p>"
+        : "<p>Stash empty.</p>";
+    }
+    grid.innerHTML = html;
     grid.querySelectorAll(".inv-item").forEach((btn) => {
       btn.addEventListener("click", () => {
         state.selectedInv = +btn.dataset.idx;
         renderInventory();
       });
     });
+    const dep = document.getElementById("btn-stash-dep");
+    const wd = document.getElementById("btn-stash-wd");
+    if (dep) dep.addEventListener("click", () => { stashDeposit(); renderInventory(); });
+    if (wd) wd.addEventListener("click", () => { stashWithdraw(); renderInventory(); });
   }
 
   function renderCraft() {
@@ -1303,14 +1519,21 @@
     const craftLv = p.skills.crafting.level;
     list.innerHTML = RECIPES.map((r) => {
       const locked = craftLv < r.skill;
-      const can = !locked && Object.keys(r.need).every((id) => invCount(p.inv, id) >= r.need[id]);
+      const needShop = r.workshop && !hasWorkshop();
+      const needKit = r.kitchen && !hasKitchen();
+      const blocked = locked || needShop || needKit;
+      const can = !blocked && canAfford(r.need);
       const needStr = Object.entries(r.need).map(([id, q]) => `${ITEM_DEFS[id].name}×${q}`).join(", ");
       const outName = ITEM_DEFS[r.out.id].name;
+      let note = "";
+      if (needShop) note = " · need Workshop";
+      else if (needKit) note = " · need Kitchen";
+      else if (locked) note = ` · Crafting ${r.skill}+`;
       return `<div class="craft-row">
         <div>
           <strong>${outName}</strong>
           <div class="meta" style="color:var(--muted);font-size:11px;margin-top:2px">
-            Need: ${needStr}${locked ? ` · Crafting ${r.skill}+` : ""}
+            Need: ${needStr}${note}
           </div>
         </div>
         <button type="button" data-recipe="${r.id}" ${can ? "" : "disabled"}>Craft</button>
@@ -1330,9 +1553,9 @@
     if (!r || !state.player) return;
     const p = state.player;
     if (p.skills.crafting.level < r.skill) return;
-    for (const [id, q] of Object.entries(r.need)) {
-      if (invCount(p.inv, id) < q) return;
-    }
+    if (r.workshop && !hasWorkshop()) return;
+    if (r.kitchen && !hasKitchen()) return;
+    if (!canAfford(r.need)) return;
     const keep = new Set(r.keep || []);
     for (const [id, q] of Object.entries(r.need)) {
       if (keep.has(id)) continue;
@@ -1341,7 +1564,90 @@
     invAdd(p.inv, r.out.id, r.out.qty);
     gainXp(p, "crafting", r.xp);
     toast(`Crafted ${ITEM_DEFS[r.out.id].name}`);
-    saveGame();
+    saveGame(true);
+  }
+
+  function renderBuild() {
+    const status = document.getElementById("build-status");
+    const actions = document.getElementById("build-actions");
+    if (!status || !actions) return;
+    const b = playerBuilding();
+    const p = state.player;
+    if (!b) {
+      status.textContent = "Walk inside a stone building, then open Build to claim or fortify it.";
+      actions.innerHTML = "";
+      return;
+    }
+    const base = b.base;
+    if (!base.claimed) {
+      status.textContent = "You are inside an unclaimed building.";
+      actions.innerHTML = '<button class="btn primary" type="button" id="btn-claim" style="width:100%;min-height:52px">Claim this building</button>';
+      document.getElementById("btn-claim").onclick = () => { claimBuilding(b); renderBuild(); updateHud(); };
+      return;
+    }
+    const tdef = BUILDING_TYPES[base.type] || BUILDING_TYPES.none;
+    status.innerHTML = "<strong>" + tdef.name + "</strong> — " + tdef.desc +
+      "<br/>Fort HP: " + base.wallHp + "/" + base.wallMax +
+      (base.boarded ? " · windows boarded" : "") +
+      (base.doorReinforced ? " · door reinforced" : "") +
+      (base.braced ? " · walls braced" : "") +
+      "<br/>Construction lvl " + p.skills.construction.level;
+    let html = "";
+    if (base.type === "none") {
+      html += '<p style="margin:8px 0 4px">Designate building type:</p><div class="build-type-grid">';
+      for (const [k, def] of Object.entries(BUILDING_TYPES)) {
+        if (k === "none") continue;
+        html += '<button class="btn" type="button" data-type="' + k + '">' + def.name +
+          '<br/><span style="font-weight:400;color:var(--muted)">Con ' + def.skill + '+</span></button>';
+      }
+      html += "</div>";
+    }
+    html += '<p style="margin:10px 0 4px">Fortify (planks &amp; nails):</p><div class="build-list">';
+    for (const [key, f] of Object.entries(FORTIFY)) {
+      const needStr = Object.entries(f.need).map(([id, q]) => ITEM_DEFS[id].name + "×" + q).join(", ");
+      const can = p.skills.construction.level >= f.skill && canAfford(f.need);
+      html += '<div class="build-row"><div><strong>' + f.label + '</strong>' +
+        '<div style="color:var(--muted);font-size:11px">' + needStr + " · Con " + f.skill + "+</div></div>" +
+        '<button type="button" data-fort="' + key + '"' + (can ? "" : " disabled") + ">Build</button></div>";
+    }
+    html += "</div>";
+    actions.innerHTML = html;
+    actions.querySelectorAll("[data-type]").forEach((btn) => {
+      btn.onclick = () => { setBuildingType(b, btn.dataset.type); renderBuild(); updateHud(); };
+    });
+    actions.querySelectorAll("[data-fort]").forEach((btn) => {
+      btn.onclick = () => { doFortify(b, btn.dataset.fort); renderBuild(); updateHud(); };
+    });
+  }
+
+  function stashDeposit() {
+    const storage = getStorageBuilding();
+    if (!storage || !pointInBuilding(state.player.x, state.player.y, storage)) return;
+    const p = state.player;
+    const keep = [];
+    for (const it of p.inv) {
+      const t = ITEM_DEFS[it.id] && ITEM_DEFS[it.id].type;
+      if (t === "mat" || t === "food" || t === "heal") invAdd(storage.base.stash, it.id, it.qty, 24);
+      else keep.push(it);
+    }
+    p.inv = keep;
+    if (p.weapon && !p.inv.some((i) => i.id === p.weapon)) p.weapon = null;
+    toast("Deposited to stash");
+    saveGame(true);
+  }
+  function stashWithdraw() {
+    const storage = getStorageBuilding();
+    if (!storage || !pointInBuilding(state.player.x, state.player.y, storage)) return;
+    const left = [];
+    for (const it of storage.base.stash) {
+      const before = invCount(state.player.inv, it.id);
+      invAdd(state.player.inv, it.id, it.qty);
+      const took = invCount(state.player.inv, it.id) - before;
+      if (took < it.qty) left.push({ id: it.id, qty: it.qty - took });
+    }
+    storage.base.stash = left;
+    toast("Withdrew from stash");
+    saveGame(true);
   }
 
   function useSelected() {
@@ -1464,6 +1770,10 @@
     openOverlay("overlay-craft");
   });
   document.getElementById("btn-close-craft").addEventListener("click", closeOverlays);
+  const btnBuild = document.getElementById("btn-build");
+  if (btnBuild) btnBuild.addEventListener("click", () => { renderBuild(); openOverlay("overlay-build"); });
+  const btnCloseBuild = document.getElementById("btn-close-build");
+  if (btnCloseBuild) btnCloseBuild.addEventListener("click", closeOverlays);
   document.getElementById("btn-menu").addEventListener("click", () => openOverlay("overlay-menu"));
   document.getElementById("btn-resume").addEventListener("click", closeOverlays);
   document.getElementById("btn-save").addEventListener("click", () => { saveGame(); });
@@ -1483,6 +1793,8 @@
     state,
     ITEM_DEFS,
     RECIPES,
+    FORTIFY,
+    BUILDING_TYPES,
     invAdd,
     invRemove,
     invCount,
@@ -1492,9 +1804,18 @@
     generateWorld,
     weaponDmg,
     serialize,
+    clientToWorld,
+    migrateSkills,
+    pointInBuilding,
+    defaultBase,
+    claimBuilding,
+    setBuildingType,
+    doFortify,
     SAVE_KEY,
+    SAVE_KEY_LEGACY,
     WORLD_W,
     WORLD_H,
+    SKILL_NAMES,
   };
 
   resize();

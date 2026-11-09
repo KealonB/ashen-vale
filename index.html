@@ -4,19 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="theme-color" content="#0d1110" />
-  <meta name="description" content="Ashen Vale — a skill-based zombie survival prototype for mobile browsers." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#1a1208" />
+  <meta name="description" content="Ashen Vale — skill-based zombie survival with base fortification." />
   <title>Ashen Vale</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=2" />
 </head>
 <body>
   <div id="app">
     <div id="title-screen">
       <h1>ASHEN VALE</h1>
-      <p class="tag">Scavenge. Level skills. Outlast the dead.<br/>A solo prototype — skills persist when you fall.</p>
-      <button class="btn primary" id="btn-new">New Game</button>
-      <button class="btn" id="btn-continue" disabled>Continue</button>
-      <button class="btn" id="btn-help-title">How to Play</button>
+      <p class="tag">Scavenge. Fortify. Level your skills.<br/>Claim a building, board the windows, outlast the dead.</p>
+      <button class="btn primary" id="btn-new" type="button">New Game</button>
+      <button class="btn" id="btn-continue" type="button" disabled>Continue</button>
+      <button class="btn" id="btn-help-title" type="button">How to Play</button>
     </div>
 
     <header id="hud-top">
@@ -37,30 +38,32 @@
 
     <div id="canvas-wrap">
       <canvas id="game"></canvas>
-      <canvas id="minimap" width="72" height="72"></canvas>
+      <canvas id="minimap" width="76" height="76"></canvas>
+      <div id="msg-log" aria-live="polite"></div>
       <div id="toast"></div>
       <div id="death-banner">
         <h3>You fell</h3>
-        <p>Skills kept. Gear dropped nearby.<br/>Respawning at the campfire…</p>
+        <p>Skills kept. Gear dropped nearby.<br/>Respawning at your safehouse or campfire…</p>
       </div>
     </div>
 
     <nav id="hud-bottom">
-      <button class="btn" id="btn-inv">Bag</button>
-      <button class="btn" id="btn-craft">Craft</button>
-      <button class="btn" id="btn-help">Help</button>
-      <button class="btn danger" id="btn-menu">Menu</button>
+      <button class="btn" id="btn-inv" type="button">Bag</button>
+      <button class="btn" id="btn-craft" type="button">Craft</button>
+      <button class="btn primary" id="btn-build" type="button">Build</button>
+      <button class="btn" id="btn-help" type="button">Help</button>
+      <button class="btn danger" id="btn-menu" type="button">Menu</button>
     </nav>
 
     <div class="overlay" id="overlay-inv">
       <div class="panel">
-        <h2>Bag</h2>
-        <p id="inv-hint">Tap an item to use or equip. Long-press not needed — use the buttons.</p>
+        <h2>Inventory</h2>
+        <p id="inv-hint">Tap an item, then Use / Equip or Drop.</p>
         <div class="inv-grid" id="inv-grid"></div>
         <div class="panel-actions">
-          <button class="btn" id="btn-use">Use / Equip</button>
-          <button class="btn" id="btn-drop">Drop</button>
-          <button class="btn primary" id="btn-close-inv">Close</button>
+          <button class="btn" id="btn-use" type="button">Use / Equip</button>
+          <button class="btn" id="btn-drop" type="button">Drop</button>
+          <button class="btn primary" id="btn-close-inv" type="button">Close</button>
         </div>
       </div>
     </div>
@@ -68,10 +71,21 @@
     <div class="overlay" id="overlay-craft">
       <div class="panel">
         <h2>Crafting</h2>
-        <p>Combine scavenged materials. Higher Crafting skill unlocks better recipes.</p>
+        <p>Combine materials. A claimed <strong>Workshop</strong> unlocks advanced recipes. Construction uses planks &amp; nails.</p>
         <div class="craft-list" id="craft-list"></div>
         <div class="panel-actions">
-          <button class="btn primary" id="btn-close-craft">Close</button>
+          <button class="btn primary" id="btn-close-craft" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay" id="overlay-build">
+      <div class="panel">
+        <h2>Base &amp; Fortify</h2>
+        <p id="build-status">Stand inside a building to claim or fortify it.</p>
+        <div id="build-actions"></div>
+        <div class="panel-actions">
+          <button class="btn primary" id="btn-close-build" type="button">Close</button>
         </div>
       </div>
     </div>
@@ -80,17 +94,16 @@
       <div class="panel">
         <h2>How to Play</h2>
         <ul>
-          <li><strong>Move:</strong> tap empty ground to walk there.</li>
-          <li><strong>Attack:</strong> tap a zombie when in range (red ring).</li>
-          <li><strong>Gather:</strong> tap trees, crates, or bushes when close.</li>
-          <li><strong>Survive:</strong> manage health &amp; hunger; eat food from the bag.</li>
-          <li><strong>Skills:</strong> Combat, Foraging, Crafting, Fitness gain XP as you play.</li>
-          <li><strong>Death:</strong> you keep skill levels; carried items drop as a loot pile.</li>
-          <li><strong>Campfire:</strong> your respawn point — stay near it early on.</li>
+          <li><strong>Move:</strong> tap empty ground. A yellow ring shows where your tap landed.</li>
+          <li><strong>Attack:</strong> tap a zombie (generous hit area).</li>
+          <li><strong>Gather:</strong> tap trees, bushes, crates, scrap.</li>
+          <li><strong>Base:</strong> open <strong>Build</strong> while inside a building — claim it, set type (Safehouse, Workshop, Storage, Kitchen), board windows, reinforce doors &amp; walls.</li>
+          <li><strong>Skills:</strong> Combat, Foraging, Crafting, Fitness, Construction.</li>
+          <li><strong>Death:</strong> skills kept; bag drops. Storage stash survives. Respawn at Safehouse or campfire.</li>
         </ul>
-        <p>This is a solo vertical slice. Multiplayer is planned later; the code separates state/update/render for that.</p>
+        <p>Original homage to classic top-down skill games — not affiliated with Jagex or The Indie Stone.</p>
         <div class="panel-actions">
-          <button class="btn primary" id="btn-close-help">Got it</button>
+          <button class="btn primary" id="btn-close-help" type="button">Got it</button>
         </div>
       </div>
     </div>
@@ -98,15 +111,15 @@
     <div class="overlay" id="overlay-menu">
       <div class="panel">
         <h2>Menu</h2>
-        <p>Progress saves automatically to this browser.</p>
+        <p>Progress saves automatically in this browser.</p>
         <div class="panel-actions" style="flex-direction:column">
-          <button class="btn primary" id="btn-resume">Resume</button>
-          <button class="btn" id="btn-save">Force Save</button>
-          <button class="btn danger" id="btn-reset">Reset Save…</button>
+          <button class="btn primary" id="btn-resume" type="button">Resume</button>
+          <button class="btn" id="btn-save" type="button">Force Save</button>
+          <button class="btn danger" id="btn-reset" type="button">Reset Save…</button>
         </div>
       </div>
     </div>
   </div>
-  <script src="game.js"></script>
+  <script src="game.js?v=2"></script>
 </body>
 </html>
