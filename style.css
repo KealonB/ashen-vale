@@ -584,3 +584,11 @@ button.craft-row.disabled .craft-go {
 .subhead { color: var(--accent); font-size: 14px; margin: 12px 0 6px; font-family: Georgia, serif; }
 .selected-place { border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent-dim); }
 #qty-sheet .panel { text-align: center; }
+
+#boot-error {
+  position: fixed; z-index: 9999; left: 8px; right: 8px; top: 8px;
+  background: #4a1810; color: #ffd0c0; border: 1px solid #c05040;
+  border-radius: 6px; padding: 10px 12px; font-size: 13px; line-height: 1.35;
+  box-shadow: 0 4px 16px rgba(0,0,0,.45); pointer-events: none;
+}
+#boot-error[hidden] { display: none !important; }

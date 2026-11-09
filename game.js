@@ -519,17 +519,36 @@
       if (!silent) toast("Game saved", "sys");
     } catch (e) { toast("Save failed", "bad"); }
   }
+  function backupCorruptSave(reason) {
+    try {
+      const stamp = Date.now();
+      const keys = [SAVE_KEY].concat(SAVE_KEY_LEGACY);
+      for (const k of keys) {
+        const raw = localStorage.getItem(k);
+        if (!raw) continue;
+        localStorage.setItem(k + "_corrupt_" + stamp, raw);
+        localStorage.removeItem(k);
+      }
+      state._saveNotice = "Save could not be loaded (" + (reason || "corrupt") + "). A backup was kept. Starting fresh.";
+      return true;
+    } catch (e) {
+      state._saveNotice = "Save could not be loaded. Starting fresh.";
+      return false;
+    }
+  }
   function loadRaw() {
+    let usedKey = SAVE_KEY;
     try {
       let raw = localStorage.getItem(SAVE_KEY);
       if (!raw) {
         for (const k of SAVE_KEY_LEGACY) {
           raw = localStorage.getItem(k);
-          if (raw) break;
+          if (raw) { usedKey = k; break; }
         }
       }
       if (!raw) return null;
       const data = JSON.parse(raw);
+      if (!data || typeof data !== "object") throw new Error("invalid save object");
       if (data.player) data.player.skills = migrateSkills(data.player.skills);
       if (data.player && !data.player.equip) {
         data.player.equip = emptyEquip();
@@ -541,36 +560,51 @@
       }
       data.props = normalizeProps(data.props);
       data.v = 4;
+      data._fromKey = usedKey;
       return data;
-    } catch (e) { return null; }
+    } catch (e) {
+      backupCorruptSave(e && e.message ? e.message : "parse");
+      return null;
+    }
   }
   function loadGame() {
-    const data = loadRaw();
-    if (!data || !data.player) return false;
-    state.seed = data.seed; state.day = data.day || 1; state.dayTimer = data.dayTimer || 0;
-    state.time = data.time || 0; state.tutorialShown = !!data.tutorialShown;
-    state.props = normalizeProps(data.props);
-    state.lootPiles = data.lootPiles || [];
-    state.mapId = data.mapId || "overworld";
-    state.interiors = data.interiors || {};
-    state.bank = data.bank || [];
-    state.shop = data.shop || { stock: SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s)), restockTimer: 120 };
-    // Migrate old worlds without interiors: keep overworld, interiors empty until new game
-    state.creatures = (data.creatures || []).map((c) => {
-      const cc = makeCreature(c.type || "zombie", c.x, c.y);
-      cc.id = c.id; cc.hp = c.hp; if (c.speed) cc.speed = c.speed;
-      cc.mapId = c.mapId || "overworld";
-      return cc;
-    });
-    const p = createPlayer(data.player.x, data.player.y, data.player.skills, data.player.equip);
-    Object.assign(p, {
-      hp: data.player.hp, maxHp: data.player.maxHp || p.maxHp,
-      hunger: data.player.hunger, inv: data.player.inv || [], kills: data.player.kills || 0,
-    });
-    syncWeaponAlias(p);
-    state.player = p;
-    state.particles = []; state.floatTexts = []; state.tapMarkers = []; state.projectiles = [];
-    return true;
+    try {
+      const data = loadRaw();
+      if (!data || !data.player) return false;
+      // Unusable world (empty props from broken migrate) → treat as corrupt
+      const props = normalizeProps(data.props);
+      const hasBuilding = props.some((p) => p.kind === "building");
+      if (!props.length || !hasBuilding) {
+        backupCorruptSave("empty world");
+        return false;
+      }
+      state.seed = data.seed; state.day = data.day || 1; state.dayTimer = data.dayTimer || 0;
+      state.time = data.time || 0; state.tutorialShown = !!data.tutorialShown;
+      state.props = props;
+      state.lootPiles = data.lootPiles || [];
+      state.mapId = data.mapId || "overworld";
+      state.interiors = data.interiors || {};
+      state.bank = Array.isArray(data.bank) ? data.bank : [];
+      state.shop = data.shop || { stock: SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s)), restockTimer: 120 };
+      state.creatures = (data.creatures || []).map((c) => {
+        const cc = makeCreature(c.type || "zombie", c.x, c.y);
+        cc.id = c.id; cc.hp = c.hp; if (c.speed) cc.speed = c.speed;
+        cc.mapId = c.mapId || "overworld";
+        return cc;
+      });
+      const p = createPlayer(data.player.x, data.player.y, data.player.skills, data.player.equip);
+      Object.assign(p, {
+        hp: data.player.hp, maxHp: data.player.maxHp || p.maxHp,
+        hunger: data.player.hunger, inv: data.player.inv || [], kills: data.player.kills || 0,
+      });
+      syncWeaponAlias(p);
+      state.player = p;
+      state.particles = []; state.floatTexts = []; state.tapMarkers = []; state.projectiles = [];
+      return true;
+    } catch (e) {
+      backupCorruptSave(e && e.message ? e.message : "load");
+      return false;
+    }
   }
   function hasSave() {
     try {
@@ -1757,16 +1791,17 @@
     state, D, ITEM_DEFS, RECIPES, FORTIFY, BUILDING_TYPES, CREATURE_DEFS, NODE_DEFS,
     FURNITURE_DEFS, SHOP_STOCK_DEFAULT, SKILL_NAMES, SKILL_LABELS, EQUIP_SLOTS,
     SAVE_KEY, SAVE_KEY_LEGACY, WORLD_W, WORLD_H, MAX_INV, TILE,
+    clamp, timeLabel, pointInBuilding,
     invAdd, invRemove, invCount, canAfford, payNeed, xpToNext, gainXp,
     createPlayer, generateWorld, serialize, clientToWorld, migrateSkills,
     emptyEquip, armorTotal, reduceDamage, meleeDamage, rangedDamage, consumeAmmo,
-    cookOutcome, recipeBlocked, doCraft, bestToolTier, defaultBase, pointInBuilding,
+    cookOutcome, recipeBlocked, doCraft, bestToolTier, defaultBase,
     enterBuilding, exitBuilding, placeFurnitureAt, furnitureFits, furnitureRect, rectsOverlap,
     bankDeposit, bankWithdraw, shopBuy, shopSell, getCoins, setCoins,
     claimBuilding, setBuildingType, doFortify, playerBuilding, buildingsList, getBuildingById,
     hasWorkshop, hasKitchen, hasForgeAccess, hasAnvilAccess, getSafehouse, getStorageBuilding,
     syncWeaponAlias, hideContextMenu, toast, saveGame, loadGame, hasSave, resetSave, startNewGame,
-    update, render, resize, canvas,
+    update, render, resize, canvas, backupCorruptSave,
   };
   window.AshenVale = window.__AV;
 })();

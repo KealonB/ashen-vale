@@ -8,13 +8,14 @@
   const {
     state, ITEM_DEFS, RECIPES, FORTIFY, BUILDING_TYPES, FURNITURE_DEFS, SHOP_STOCK_DEFAULT,
     SKILL_LABELS, EQUIP_SLOTS, MAX_INV,
+    clamp, timeLabel, pointInBuilding,
     invAdd, invRemove, invCount, canAfford, payNeed, gainXp,
     armorTotal, recipeBlocked, doCraft, placeFurnitureAt,
     bankDeposit, bankWithdraw, shopBuy, shopSell, getCoins, setCoins,
     claimBuilding, setBuildingType, doFortify, playerBuilding, getBuildingById,
     hasWorkshop, hasKitchen, hasForgeAccess, hasAnvilAccess, getSafehouse, getStorageBuilding,
     syncWeaponAlias, hideContextMenu, toast, saveGame, loadGame, hasSave, resetSave, startNewGame,
-    update, render, resize, canvas, enterBuilding, exitBuilding,
+    update, render, resize, canvas, enterBuilding, exitBuilding, backupCorruptSave,
   } = A;
 
   // ── UI ──
@@ -466,12 +467,37 @@
   }
 
   // ── Boot ──
+  function showBootError(err) {
+    try {
+      const el = document.getElementById("boot-error");
+      if (!el) { console.error(err); return; }
+      const msg = (err && err.message) ? err.message : String(err || "Unknown error");
+      el.hidden = false;
+      el.textContent = "Ashen Vale hit an error: " + msg + " — Try New Game, or clear site data if it keeps failing.";
+      console.error(err);
+    } catch (e) { console.error(err); }
+  }
+  function showSaveNotice() {
+    if (!state._saveNotice) return;
+    const msg = state._saveNotice;
+    state._saveNotice = "";
+    toast(msg, "bad");
+    try {
+      const el = document.getElementById("boot-error");
+      if (el) { el.hidden = false; el.textContent = msg; setTimeout(() => { el.hidden = true; }, 8000); }
+    } catch (e) {}
+  }
+
   let last = performance.now();
   function frame(now) {
-    const dt = Math.min(0.05, (now - last) / 1000);
-    last = now;
-    update(dt);
-    render();
+    try {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      update(dt);
+      render();
+    } catch (err) {
+      showBootError(err);
+    }
     requestAnimationFrame(frame);
   }
 
@@ -483,16 +509,26 @@
   function hideTitle() { document.getElementById("title-screen").classList.add("hidden"); }
 
   function beginPlay(fromSave) {
-    hideTitle(); closeOverlays(); hideContextMenu();
-    if (fromSave) {
-      if (!loadGame()) startNewGame();
-      else { state.running = true; state.paused = false; toast("Welcome back", "sys"); }
-    } else startNewGame();
-    updateHud();
-    if (!state.tutorialShown) {
-      state.tutorialShown = true;
-      setTimeout(() => openOverlay("overlay-help"), 400);
-      saveGame(true);
+    try {
+      hideTitle(); closeOverlays(); hideContextMenu();
+      if (fromSave) {
+        if (!loadGame()) {
+          showSaveNotice();
+          startNewGame();
+        } else {
+          state.running = true; state.paused = false; toast("Welcome back", "sys");
+        }
+      } else startNewGame();
+      updateHud();
+      showSaveNotice();
+      if (!state.tutorialShown) {
+        state.tutorialShown = true;
+        setTimeout(() => openOverlay("overlay-help"), 400);
+        saveGame(true);
+      }
+    } catch (err) {
+      showBootError(err);
+      try { showTitle(); } catch (e) {}
     }
   }
 
@@ -579,7 +615,11 @@
     updateHud, openOverlay, closeOverlays,
   });
 
-  resize();
-  showTitle();
-  requestAnimationFrame(frame);
+  try {
+    resize();
+    showTitle();
+    requestAnimationFrame(frame);
+  } catch (err) {
+    showBootError(err);
+  }
 })();

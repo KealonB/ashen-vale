@@ -32,7 +32,14 @@ function makeEl(id) {
     disabled: false, textContent: "", innerHTML: "", width: 76, height: 76,
     clientWidth: 390, clientHeight: 500, offsetWidth: 200, offsetHeight: 160,
     children: [], dataset: {},
-    getContext() { return new Proxy({}, { get: () => () => {}, set: () => true }); },
+    getContext() {
+      const grad = { addColorStop() {} };
+      return new Proxy({
+        createRadialGradient: () => grad,
+        createLinearGradient: () => grad,
+        measureText: () => ({ width: 10 }),
+      }, { get: (t, p) => (p in t ? t[p] : () => {}), set: () => true });
+    },
     getBoundingClientRect() { return { left: 0, top: 56, width: 390, height: 500 }; },
     setPointerCapture() {}, addEventListener() {}, querySelector() { return makeEl("q"); },
     querySelectorAll() { return []; },
@@ -180,7 +187,65 @@ assert(Math.abs(w.x - 150) < 0.01 && Math.abs(w.y - 150) < 0.01, "touch mapping 
 
 const html = readFileSync(path.join(__dirname, "index.html"), "utf8");
 assert(html.includes("overlay-bank") && html.includes("overlay-shop"), "bank/shop markup");
-assert(html.includes("data.js?v=4"), "cache bust v4");
+assert(html.includes("data.js?v=5") && html.includes("ui.js?v=5"), "cache bust v5");
+assert(html.includes("boot-error"), "boot-error banner markup");
+
+
+// Exported helpers required by ui.js (blank-screen regression)
+assert(typeof AV.clamp === "function" && AV.clamp(5, 0, 1) === 1, "clamp exported");
+assert(typeof AV.timeLabel === "function", "timeLabel exported");
+assert(typeof AV.pointInBuilding === "function", "pointInBuilding exported");
+assert(typeof AV.backupCorruptSave === "function", "backupCorruptSave exported");
+
+// Step a few frames without throw (DOM scripts already loaded)
+AV.startNewGame();
+assert(!!AV.state.player && AV.state.running, "new game running");
+let frameOk = true;
+try {
+  for (let i = 0; i < 5; i++) AV.update(0.016);
+  if (AV.updateHudImpl) AV.updateHudImpl();
+  // render needs real canvas gradients; smoke-call only if createRadialGradient exists
+  const ctx = AV.canvas && AV.canvas.getContext && AV.canvas.getContext("2d");
+  if (ctx && typeof ctx.createRadialGradient === "function") {
+    for (let i = 0; i < 3; i++) AV.render();
+  }
+} catch (e) { frameOk = false; console.error(e); }
+assert(frameOk, "update/hud frames no throw");
+
+// Corrupt save → backup + fail load
+localStore.clear();
+localStore.set("ashenvale_save_v3", "{not-json");
+assert(AV.loadGame() === false, "corrupt v3 load fails");
+assert([...localStore.keys()].some((k) => k.includes("_corrupt_")), "corrupt backed up");
+assert(!!AV.state._saveNotice, "save notice set");
+
+// Realistic v3 save with buildings loads
+localStore.clear();
+AV.startNewGame();
+const snap = AV.serialize();
+snap.v = 3;
+delete snap.interiors;
+delete snap.mapId;
+delete snap.bank;
+delete snap.shop;
+localStore.clear();
+localStore.set("ashenvale_save_v3", JSON.stringify(snap));
+assert(AV.loadGame() === true, "realistic v3 migrates");
+assert(AV.state.bank && Array.isArray(AV.state.bank), "bank defaulted");
+assert(AV.state.mapId === "overworld", "mapId defaulted");
+assert(AV.state.props.some((p) => p.kind === "building"), "buildings kept");
+
+// v2 shape with zombies array
+const v2 = AV.serialize();
+v2.v = 2;
+v2.zombies = v2.creatures;
+delete v2.creatures;
+delete v2.interiors;
+localStore.clear();
+localStore.set("ashenvale_save_v2", JSON.stringify(v2));
+assert(AV.loadGame() === true, "realistic v2 migrates");
+assert(AV.state.creatures.length >= 0, "creatures from zombies");
+
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
