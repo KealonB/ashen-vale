@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataSrc = readFileSync(path.join(__dirname, "data.js"), "utf8");
 const gameSrc = readFileSync(path.join(__dirname, "game.js"), "utf8");
+const uiSrc = readFileSync(path.join(__dirname, "ui.js"), "utf8");
 
 let passed = 0, failed = 0;
 function assert(cond, msg) {
@@ -20,6 +21,8 @@ try { new vm.Script(dataSrc); assert(true, "data.js parses"); }
 catch (e) { assert(false, "data parse " + e.message); }
 try { new vm.Script(gameSrc); assert(true, "game.js parses"); }
 catch (e) { assert(false, "game parse " + e.message); }
+try { new vm.Script(uiSrc); assert(true, "ui.js parses"); }
+catch (e) { assert(false, "ui parse " + e.message); }
 
 const elements = new Map();
 function makeEl(id) {
@@ -67,6 +70,7 @@ sandbox.globalThis = sandbox; sandbox.self = sandbox;
 try {
   vm.runInNewContext(dataSrc, sandbox, { filename: "data.js" });
   vm.runInNewContext(gameSrc, sandbox, { filename: "game.js" });
+  vm.runInNewContext(uiSrc, sandbox, { filename: "ui.js" });
   assert(!!sandbox.window.AshenVale && !!sandbox.window.AshenData, "APIs exported");
 } catch (e) {
   assert(false, "load: " + e.message);
