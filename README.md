@@ -1,50 +1,26 @@
 # Ashen Vale
 
-A **solo**, mobile-first zombie survival prototype in plain HTML/CSS/JavaScript.  
-Inspired by the *feel* of classic skill grinding and Project Zomboid–style scavenging — original canvas art, title, and code (not affiliated with Jagex or The Indie Stone).
+Solo mobile-first zombie survival with classic skill-grinding vibes. Original canvas art and code — not affiliated with Jagex or The Indie Stone.
 
-**Play online:** [https://kealonb.github.io/ashen-vale/](https://kealonb.github.io/ashen-vale/)
+**Play:** [https://kealonb.github.io/ashen-vale/](https://kealonb.github.io/ashen-vale/)
 
-## Play locally
+## Phase 1 highlights
 
-1. Open `index.html` in a modern mobile or desktop browser.
-2. Tap **New Game**.
-3. Tap ground to move (yellow ring = registered tap), tap zombies to attack, tap trees/bushes/crates to gather.
-4. Open **Build** while standing inside a stone building to claim, designate type, and fortify.
-
-## Features
-
-- Top-down RSC-inspired original canvas art (chunky tiles, outlined sprites, stone/timber buildings)
-- Tap-to-move / attack / gather with fixed mobile touch mapping + tap markers
-- Health & hunger, day/night cycle
-- Skills: Combat, Foraging, Crafting, Fitness, **Construction**
-- **Base building inside existing buildings only**: claim → Safehouse / Workshop / Storage / Kitchen
-- Fortify: board windows, reinforce doors, brace walls; zombies attack barricades
-- Inventory, crafting (Workshop/Kitchen unlock advanced recipes), death drops gear (skills kept; Storage stash persists)
-- `localStorage` save v2 (migrates old v1 skills gracefully)
+- **Skills panel** (Craft / Smith / Build / Equip) with owned vs needed materials
+- **Long-press / right-click** context menu (Attack, Chop/Mine/Fish, Pick up, Examine, Walk)
+- Gathering: Woodcutting, Mining, Fishing, Cooking (+ Crafting, Smithing, Construction, Attack, Ranged, Fitness)
+- Tool tiers (bronze/iron/steel axe & pickaxe), forge smelting & anvil smithing
+- Swords, shortbow + craftable arrows, equipment slots & armor
+- Creatures: zombies, rats, goblins (hostile); squirrels & chickens (flee)
 
 ## Files
 
-| File | Role |
-|------|------|
-| `index.html` | Shell, HUD, overlays |
-| `style.css` | Classic stone/wood UI |
-| `game.js` | State, simulation, canvas render |
-| `.nojekyll` | GitHub Pages serves files as-is |
-| `test-core.mjs` | Headless unit tests |
+`index.html` · `style.css` · `data.js` · `game.js` · `.nojekyll` · `test-core.mjs`
 
-No external dependencies, no build step. Cache-bust: `?v=2` on CSS/JS links.
+## Local
 
-## Deploy on GitHub Pages
+Open `index.html` or any static server. `node test-core.mjs` for headless tests.
 
-Repo uses **Deploy from a branch**: `main` + `/` (root).  
-Live: `https://kealonb.github.io/ashen-vale/`
+## Save
 
-## Reset / privacy
-
-Progress is in this browser’s `localStorage` (`ashenvale_save_v2`).  
-**Menu → Reset Save** clears it.
-
-## License
-
-Prototype for personal / demo use.
+`localStorage` key `ashenvale_save_v3` (migrates v1/v2).

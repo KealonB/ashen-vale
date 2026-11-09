@@ -6,15 +6,15 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#1a1208" />
-  <meta name="description" content="Ashen Vale — skill-based zombie survival with base fortification." />
+  <meta name="description" content="Ashen Vale — skill-based zombie survival with crafting, smithing, and bases." />
   <title>Ashen Vale</title>
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=3" />
 </head>
 <body>
   <div id="app">
     <div id="title-screen">
       <h1>ASHEN VALE</h1>
-      <p class="tag">Scavenge. Fortify. Level your skills.<br/>Claim a building, board the windows, outlast the dead.</p>
+      <p class="tag">Chop. Mine. Smith. Fortify.<br/>Long-press the world for actions. Tap for the default.</p>
       <button class="btn primary" id="btn-new" type="button">New Game</button>
       <button class="btn" id="btn-continue" type="button" disabled>Continue</button>
       <button class="btn" id="btn-help-title" type="button">How to Play</button>
@@ -49,8 +49,7 @@
 
     <nav id="hud-bottom">
       <button class="btn" id="btn-inv" type="button">Bag</button>
-      <button class="btn" id="btn-craft" type="button">Craft</button>
-      <button class="btn primary" id="btn-build" type="button">Build</button>
+      <button class="btn primary" id="btn-skills" type="button">Skills</button>
       <button class="btn" id="btn-help" type="button">Help</button>
       <button class="btn danger" id="btn-menu" type="button">Menu</button>
     </nav>
@@ -68,24 +67,19 @@
       </div>
     </div>
 
-    <div class="overlay" id="overlay-craft">
-      <div class="panel">
-        <h2>Crafting</h2>
-        <p>Combine materials. A claimed <strong>Workshop</strong> unlocks advanced recipes. Construction uses planks &amp; nails.</p>
-        <div class="craft-list" id="craft-list"></div>
-        <div class="panel-actions">
-          <button class="btn primary" id="btn-close-craft" type="button">Close</button>
+    <div class="overlay" id="overlay-workshop">
+      <div class="panel panel-tall">
+        <h2>Skills &amp; Workshop</h2>
+        <div class="ws-tabs" role="tablist">
+          <button type="button" class="ws-tab active" data-tab="craft">Craft</button>
+          <button type="button" class="ws-tab" data-tab="smith">Smith</button>
+          <button type="button" class="ws-tab" data-tab="build">Build</button>
+          <button type="button" class="ws-tab" data-tab="equip">Equip</button>
         </div>
-      </div>
-    </div>
-
-    <div class="overlay" id="overlay-build">
-      <div class="panel">
-        <h2>Base &amp; Fortify</h2>
-        <p id="build-status">Stand inside a building to claim or fortify it.</p>
-        <div id="build-actions"></div>
+        <p id="workshop-status" class="ws-status">Choose a tab.</p>
+        <div id="workshop-body"></div>
         <div class="panel-actions">
-          <button class="btn primary" id="btn-close-build" type="button">Close</button>
+          <button class="btn primary" id="btn-close-workshop" type="button">Close</button>
         </div>
       </div>
     </div>
@@ -94,14 +88,15 @@
       <div class="panel">
         <h2>How to Play</h2>
         <ul>
-          <li><strong>Move:</strong> tap empty ground. A yellow ring shows where your tap landed.</li>
-          <li><strong>Attack:</strong> tap a zombie (generous hit area).</li>
-          <li><strong>Gather:</strong> tap trees, bushes, crates, scrap.</li>
-          <li><strong>Base:</strong> open <strong>Build</strong> while inside a building — claim it, set type (Safehouse, Workshop, Storage, Kitchen), board windows, reinforce doors &amp; walls.</li>
-          <li><strong>Skills:</strong> Combat, Foraging, Crafting, Fitness, Construction.</li>
-          <li><strong>Death:</strong> skills kept; bag drops. Storage stash survives. Respawn at Safehouse or campfire.</li>
+          <li><strong>Tap:</strong> default action (walk / attack / gather). Yellow ring shows the registered tap.</li>
+          <li><strong>Long-press</strong> (or right-click): action menu — Attack, Chop/Mine/Fish, Pick up, Examine, Walk here.</li>
+          <li><strong>Skills:</strong> Craft, Smith, Build, Equip tabs. Recipes show owned/needed mats; locked ones are grey.</li>
+          <li><strong>Tools:</strong> bronze/iron/steel axe &amp; pickaxe gate trees and rocks.</li>
+          <li><strong>Combat:</strong> swords melee; shortbow + arrows for Ranged. Armor reduces damage.</li>
+          <li><strong>Creatures:</strong> zombies, rats, goblins (hostile); squirrels &amp; chickens flee.</li>
+          <li><strong>Death:</strong> skills kept; gear drops. Storage stash persists.</li>
         </ul>
-        <p>Original homage to classic top-down skill games — not affiliated with Jagex or The Indie Stone.</p>
+        <p>Original homage — not affiliated with Jagex or The Indie Stone.</p>
         <div class="panel-actions">
           <button class="btn primary" id="btn-close-help" type="button">Got it</button>
         </div>
@@ -119,7 +114,13 @@
         </div>
       </div>
     </div>
+
+    <div id="context-menu" aria-hidden="true">
+      <div id="context-list"></div>
+      <button type="button" class="ctx-item ctx-cancel" id="context-dismiss">Cancel</button>
+    </div>
   </div>
-  <script src="game.js?v=2"></script>
+  <script src="data.js?v=3"></script>
+  <script src="game.js?v=3"></script>
 </body>
 </html>

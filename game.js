@@ -1,137 +1,53 @@
 /**
- * Ashen Vale — skill-based zombie survival prototype
- * Architecture: STATE (data) → UPDATE (simulation) → RENDER (canvas)
- * Solo vertical slice; multiplayer not implemented (structure leaves room).
+ * Ashen Vale Phase 1 — STATE / UPDATE / RENDER
+ * Depends on data.js (window.AshenData)
  */
 (function () {
   "use strict";
+  const D = window.AshenData;
+  const {
+    SAVE_KEY, SAVE_KEY_LEGACY, SKILL_NAMES, SKILL_LABELS, EQUIP_SLOTS,
+    BUILDING_TYPES, FORTIFY, ITEM_DEFS, RECIPES, NODE_DEFS, CREATURE_DEFS,
+    xpToNext, emptySkills, migrateSkills, emptyEquip,
+    invCount, invAdd, invRemove, canAfford, payNeed,
+    bestToolTier, armorTotal, reduceDamage, meleeDamage, rangedDamage,
+    consumeAmmo, cookOutcome, clientToWorld, defaultBase,
+  } = D;
 
-  // ═══════════════════════════════════════════════════════════
-  // CONSTANTS
-  // ═══════════════════════════════════════════════════════════
-  const SAVE_KEY = "ashenvale_save_v2";
-  const SAVE_KEY_LEGACY = "ashenvale_save_v1";
-  const WORLD_W = 2400;
-  const WORLD_H = 2400;
-  const TILE = 32;
-  const PLAYER_R = 14;
-  const ZOMBIE_R = 13;
-  const ATTACK_RANGE = 52;
-  const GATHER_RANGE = 48;
-  const DAY_LEN = 180; // seconds of real time per in-game day
-  const HUNGER_RATE = 0.35; // per second
-  const MOVE_BASE = 95;
-  const ZOMBIE_SPEED = 48;
-  const AGRO_RANGE = 160;
-  const MAX_INV = 16;
+  const WORLD_W = 2800, WORLD_H = 2800, TILE = 32;
+  const PLAYER_R = 12, ATTACK_RANGE = 56, GATHER_RANGE = 52;
+  const DAY_LEN = 180, HUNGER_RATE = 0.32, MOVE_BASE = 95, AGRO_BASE = 160, MAX_INV = 24;
 
-  const SKILL_NAMES = ["combat", "foraging", "crafting", "fitness", "construction"];
-  const SKILL_LABELS = { combat: "Combat", foraging: "Foraging", crafting: "Crafting", fitness: "Fitness", construction: "Construction" };
-
-  const BUILDING_TYPES = {
-    none: { name: "Unclaimed", desc: "Claim to designate a use." },
-    safehouse: { name: "Safehouse", desc: "Respawn here. Slow heal inside.", skill: 1 },
-    workshop: { name: "Workshop", desc: "Unlocks advanced craft recipes.", skill: 2 },
-    storage: { name: "Storage", desc: "Stash persists through death.", skill: 2 },
-    kitchen: { name: "Kitchen", desc: "Cook hearty stew from berries.", skill: 3 },
-  };
-
-  const FORTIFY = {
-    board: { label: "Board windows", need: { plank: 2, nails: 2 }, skill: 1, xp: 18, addWall: 40 },
-    door:  { label: "Reinforce door", need: { plank: 3, nails: 4 }, skill: 2, xp: 28, addWall: 60 },
-    walls: { label: "Brace walls", need: { plank: 4, nails: 6 }, skill: 3, xp: 40, addWall: 80 },
-    repair:{ label: "Repair fortifications", need: { plank: 1, nails: 1 }, skill: 1, xp: 10, repair: 35 },
-  };
-
-  const ITEM_DEFS = {
-    wood:      { name: "Wood", stack: 20, type: "mat" },
-    stick:     { name: "Stick", stack: 20, type: "mat" },
-    cloth:     { name: "Cloth", stack: 10, type: "mat" },
-    scrap:     { name: "Scrap Metal", stack: 15, type: "mat" },
-    berries:   { name: "Berries", stack: 10, type: "food", heal: 0, hunger: 18 },
-    canned:    { name: "Canned Food", stack: 5, type: "food", heal: 8, hunger: 40 },
-    bandage:   { name: "Bandage", stack: 8, type: "heal", heal: 28, hunger: 0 },
-    knife:     { name: "Knife", stack: 1, type: "weapon", dmg: 14, range: "Knife" },
-    spear:     { name: "Spear", stack: 1, type: "weapon", dmg: 22, range: "Spear" },
-    bat:       { name: "Nail Bat", stack: 1, type: "weapon", dmg: 30, range: "Nail Bat" },
-    water:     { name: "Water Bottle", stack: 5, type: "food", heal: 4, hunger: 8 },
-  };
-
-  const RECIPES = [
-    { id: "plank", out: { id: "plank", qty: 2 }, need: { wood: 1 }, skill: 1, xp: 6 },
-    { id: "nails", out: { id: "nails", qty: 4 }, need: { scrap: 1 }, skill: 1, xp: 8 },
-    { id: "bandage", out: { id: "bandage", qty: 1 }, need: { cloth: 2 }, skill: 1, xp: 12 },
-    { id: "stick", out: { id: "stick", qty: 2 }, need: { wood: 1 }, skill: 1, xp: 6 },
-    { id: "spear", out: { id: "spear", qty: 1 }, need: { stick: 2, knife: 1 }, keep: ["knife"], skill: 2, xp: 25 },
-    { id: "bat", out: { id: "bat", qty: 1 }, need: { wood: 3, scrap: 2 }, skill: 4, xp: 40, workshop: true },
-    { id: "stew", out: { id: "stew", qty: 1 }, need: { berries: 3, water: 1 }, skill: 1, xp: 15, kitchen: true },
-  ];
-
-  // ═══════════════════════════════════════════════════════════
-  // STATE
-  // ═══════════════════════════════════════════════════════════
   const state = {
-    running: false,
-    paused: false,
-    time: 0,
-    day: 1,
-    dayTimer: 0,
-    cam: { x: 0, y: 0 },
-    viewW: 390,
-    viewH: 500,
-    player: null,
-    tapMarkers: [],
-    msgLog: [],
-    zombies: [],
-    props: [],       // trees, bushes, crates, buildings (static + gatherable)
-    lootPiles: [],   // ground loot / death drops
-    particles: [],
-    floatTexts: [],
-    selectedInv: -1,
-    toastTimer: 0,
-    toastMsg: "",
-    deathTimer: 0,
-    tutorialShown: false,
-    seed: 1,
+    running: false, paused: false, time: 0, day: 1, dayTimer: 0,
+    cam: { x: 0, y: 0 }, viewW: 390, viewH: 500,
+    player: null, creatures: [], props: [], lootPiles: [],
+    particles: [], floatTexts: [], tapMarkers: [], projectiles: [],
+    msgLog: [], selectedInv: -1, deathTimer: 0, tutorialShown: false, seed: 1,
+    contextMenu: null, longPress: null, workshopTab: "craft",
   };
 
-  function emptySkills() {
-    const s = {};
-    for (const n of SKILL_NAMES) s[n] = { level: 1, xp: 0, next: 50 };
-    return s;
+  function toast(msg, kind) {
+    state.toastMsg = msg; state.toastTimer = 2.2;
+    const el = document.getElementById("toast");
+    if (el) { el.textContent = msg; el.classList.add("show"); }
+    logMsg(msg, kind || "sys");
   }
-
-  function xpToNext(level) {
-    return Math.floor(50 * Math.pow(1.35, level - 1));
+  function logMsg(text, kind) {
+    state.msgLog.push({ text, kind: kind || "", t: state.time });
+    if (state.msgLog.length > 8) state.msgLog.shift();
+    const el = document.getElementById("msg-log");
+    if (el) el.innerHTML = state.msgLog.map((m) => `<div class="${m.kind}">${m.text}</div>`).join("");
   }
-
-  function createPlayer(x, y, keepSkills) {
-    const skills = keepSkills ? migrateSkills(keepSkills) : emptySkills();
-    return {
-      x, y,
-      vx: 0, vy: 0,
-      target: null, // {x,y} or {zombieId}
-      r: PLAYER_R,
-      hp: 100, maxHp: 100,
-      hunger: 100, maxHunger: 100,
-      attackCd: 0,
-      gatherCd: 0,
-      facing: 0,
-      weapon: null, // item id equipped
-      inv: [
-        { id: "knife", qty: 1 },
-        { id: "berries", qty: 3 },
-        { id: "bandage", qty: 1 },
-        { id: "plank", qty: 2 },
-        { id: "nails", qty: 4 },
-      ],
-      skills,
-      kills: 0,
-      alive: true,
-    };
+  function floatText(x, y, text, color) { state.floatTexts.push({ x, y, text, color, life: 0.9 }); }
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 30 + Math.random() * 60;
+      state.particles.push({ x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp, life: 0.35 + Math.random()*0.35, color, r: 2+Math.random()*2 });
+    }
   }
-
-  // Simple seeded RNG for map gen
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
   function mulberry32(a) {
     return function () {
       let t = (a += 0x6d2b79f5);
@@ -141,28 +57,42 @@
     };
   }
 
-  function dist(a, b) {
-    const dx = a.x - b.x, dy = a.y - b.y;
-    return Math.hypot(dx, dy);
+  function gainXp(p, skill, amount) {
+    const s = p.skills[skill]; if (!s) return;
+    s.xp += amount;
+    while (s.xp >= s.next) {
+      s.xp -= s.next; s.level += 1; s.next = xpToNext(s.level);
+      toast(SKILL_LABELS[skill] + " → Level " + s.level + "!", "good");
+    }
+    if (skill === "fitness") p.maxHp = 100 + (s.level - 1) * 5;
   }
 
-  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function createPlayer(x, y, keepSkills, keepEquip) {
+    const skills = keepSkills ? migrateSkills(keepSkills) : emptySkills();
+    const equip = keepEquip ? Object.assign(emptyEquip(), keepEquip) : emptyEquip();
+    return {
+      x, y, r: PLAYER_R, target: null, facing: 0,
+      hp: 100, maxHp: 100 + (skills.fitness.level - 1) * 5,
+      hunger: 100, maxHunger: 100,
+      attackCd: 0, gatherCd: 0, weapon: null,
+      inv: [
+        { id: "knife", qty: 1 }, { id: "bronze_axe", qty: 1 }, { id: "bronze_pick", qty: 1 },
+        { id: "berries", qty: 3 }, { id: "bandage", qty: 1 }, { id: "plank", qty: 2 }, { id: "nails", qty: 4 },
+        { id: "bronze_arrows", qty: 15 },
+      ],
+      skills, equip, kills: 0, alive: true,
+    };
+  }
+
+  function syncWeaponAlias(p) {
+    // legacy weapon field mirrors equip.weapon
+    p.weapon = p.equip.weapon;
+  }
 
   function pointInBuilding(x, y, b) {
     return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
   }
   function buildingCenter(b) { return { x: b.x + b.w / 2, y: b.y + b.h / 2 }; }
-  function defaultBase() {
-    return { claimed: false, type: "none", wallHp: 0, wallMax: 0, boarded: false, doorReinforced: false, braced: false, stash: [] };
-  }
-  function migrateSkills(skills) {
-    const base = emptySkills();
-    if (!skills) return base;
-    for (const n of SKILL_NAMES) {
-      if (skills[n]) base[n] = { level: skills[n].level || 1, xp: skills[n].xp || 0, next: skills[n].next || xpToNext(skills[n].level || 1) };
-    }
-    return base;
-  }
   function buildingsList() { return state.props.filter((p) => p.kind === "building"); }
   function buildingAt(x, y) {
     for (const b of buildingsList()) if (pointInBuilding(x, y, b)) return b;
@@ -171,372 +101,273 @@
   function playerBuilding() { return state.player ? buildingAt(state.player.x, state.player.y) : null; }
   function hasWorkshop() { return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop"); }
   function hasKitchen() { return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "kitchen"); }
+  function hasForgeAccess() {
+    if (state.props.some((p) => p.kind === "forge")) return true;
+    return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop" && (b.base.hasForge || true));
+  }
+  function hasAnvilAccess() {
+    return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop");
+  }
   function getSafehouse() { return buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "safehouse"); }
   function getStorageBuilding() { return buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "storage"); }
 
-  function invCount(inv, id) {
-    let n = 0;
-    for (const it of inv) if (it.id === id) n += it.qty;
-    return n;
+  function propCenter(prop) {
+    if (prop.kind === "building") return buildingCenter(prop);
+    return { x: prop.x, y: prop.y };
   }
 
-  function invAdd(inv, id, qty) {
-    const def = ITEM_DEFS[id];
-    if (!def) return false;
-    qty = qty || 1;
-    for (const it of inv) {
-      if (it.id === id && it.qty < def.stack) {
-        const space = def.stack - it.qty;
-        const take = Math.min(space, qty);
-        it.qty += take;
-        qty -= take;
-        if (qty <= 0) return true;
-      }
-    }
-    while (qty > 0) {
-      if (inv.length >= MAX_INV) return qty < (arguments[2] || qty); // partial
-      const take = Math.min(def.stack, qty);
-      inv.push({ id, qty: take });
-      qty -= take;
-    }
-    return true;
+  function makeCreature(type, x, y, rnd) {
+    const r = rnd || Math.random;
+    const def = CREATURE_DEFS[type];
+    const hp = def.hp[0] + Math.floor(r() * (def.hp[1] - def.hp[0] + 1));
+    return {
+      id: Math.floor(r() * 1e9), type, x, y, r: def.r,
+      hp, maxHp: hp, speed: def.speed * (0.9 + r() * 0.2),
+      attackCd: 0, wanderT: r() * 3, wx: x, wy: y,
+      alive: true, hitFlash: 0, aggressive: !!def.aggressive, flee: !!def.flee,
+      agro: def.agro || AGRO_BASE,
+    };
   }
 
-  function invRemove(inv, id, qty) {
-    qty = qty || 1;
-    for (let i = inv.length - 1; i >= 0 && qty > 0; i--) {
-      if (inv[i].id !== id) continue;
-      const take = Math.min(inv[i].qty, qty);
-      inv[i].qty -= take;
-      qty -= take;
-      if (inv[i].qty <= 0) inv.splice(i, 1);
-    }
-    return qty <= 0;
-  }
-
-  function weaponDmg(p) {
-    if (p.weapon && ITEM_DEFS[p.weapon]) return ITEM_DEFS[p.weapon].dmg;
-    return 8; // fists
-  }
-
-  function moveSpeed(p) {
-    const fit = p.skills.fitness.level;
-    return MOVE_BASE * (1 + (fit - 1) * 0.04);
-  }
-
-  function gainXp(p, skill, amount) {
-    const s = p.skills[skill];
-    if (!s) return;
-    s.xp += amount;
-    let leveled = false;
-    while (s.xp >= s.next) {
-      s.xp -= s.next;
-      s.level += 1;
-      s.next = xpToNext(s.level);
-      leveled = true;
-      toast(`${SKILL_LABELS[skill]} → Level ${s.level}!`);
-    }
-    if (leveled && skill === "fitness") {
-      p.maxHp = 100 + (s.level - 1) * 5;
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // WORLD GENERATION
-  // ═══════════════════════════════════════════════════════════
   function generateWorld(seed) {
     const rnd = mulberry32(seed);
-    const props = [];
-    const zombies = [];
-    const lootPiles = [];
-
-    // Campfire spawn center
+    const props = [], creatures = [], lootPiles = [];
     const cx = WORLD_W / 2, cy = WORLD_H / 2;
-    props.push({ kind: "campfire", x: cx, y: cy, r: 20, solid: false });
+    props.push({ kind: "campfire", x: cx, y: cy, r: 18, solid: false, cook: true });
+    props.push({ kind: "forge", x: cx - 60, y: cy + 80, r: 16, solid: true });
 
-    // Buildings (rects)
     const buildings = [
-      { x: cx - 280, y: cy - 60, w: 120, h: 100 },
-      { x: cx + 160, y: cy - 200, w: 140, h: 110 },
-      { x: cx - 100, y: cy + 220, w: 160, h: 90 },
-      { x: cx + 300, y: cy + 120, w: 100, h: 120 },
-      { x: cx - 420, y: cy + 80, w: 110, h: 90 },
+      { x: cx - 300, y: cy - 80, w: 130, h: 110 },
+      { x: cx + 180, y: cy - 220, w: 140, h: 110 },
+      { x: cx - 120, y: cy + 240, w: 160, h: 100 },
+      { x: cx + 320, y: cy + 140, w: 110, h: 120 },
+      { x: cx - 460, y: cy + 60, w: 120, h: 100 },
     ];
     for (const b of buildings) {
       props.push({ kind: "building", x: b.x, y: b.y, w: b.w, h: b.h, solid: true, base: defaultBase() });
-      // crates near buildings
-      const nCrates = 1 + Math.floor(rnd() * 2);
-      for (let i = 0; i < nCrates; i++) {
-        props.push({
-          kind: "crate",
-          x: b.x + 20 + rnd() * (b.w - 40),
-          y: b.y + b.h + 18 + rnd() * 30,
-          r: 12,
-          solid: true,
-          hp: 1,
-          loot: pickCrateLoot(rnd),
-        });
-      }
+      props.push({
+        kind: "crate", x: b.x + 20 + rnd() * (b.w - 40), y: b.y + b.h + 20 + rnd() * 24,
+        r: 12, solid: true, hp: 1, node: null,
+        loot: pickLoot(rnd),
+      });
     }
 
-    // Trees & bushes
-    for (let i = 0; i < 90; i++) {
-      const x = 80 + rnd() * (WORLD_W - 160);
-      const y = 80 + rnd() * (WORLD_H - 160);
+    // Goblin camp
+    const gx = cx + 520, gy = cy - 380;
+    props.push({ kind: "building", x: gx, y: gy, w: 90, h: 70, solid: true, base: defaultBase(), goblinHut: true });
+    for (let i = 0; i < 5; i++) {
+      creatures.push(makeCreature("goblin", gx + 40 + (rnd() - 0.5) * 120, gy + 80 + rnd() * 80, rnd));
+    }
+
+    for (let i = 0; i < 55; i++) {
+      const x = 80 + rnd() * (WORLD_W - 160), y = 80 + rnd() * (WORLD_H - 160);
+      if (Math.hypot(x - cx, y - cy) < 110) continue;
+      if (nearBuilding(x, y, buildings, 40)) continue;
+      const kind = rnd() < 0.72 ? "tree" : "oak";
+      props.push({ kind, x, y, r: kind === "oak" ? 18 : 15, solid: true, hp: kind === "oak" ? 4 : 3, node: kind });
+    }
+    for (let i = 0; i < 28; i++) {
+      const x = 80 + rnd() * (WORLD_W - 160), y = 80 + rnd() * (WORLD_H - 160);
       if (Math.hypot(x - cx, y - cy) < 100) continue;
-      if (insideAnyBuilding(x, y, buildings, 30)) continue;
-      if (rnd() < 0.55) {
-        props.push({ kind: "tree", x, y, r: 16, solid: true, hp: 3, gathered: 0 });
-      } else {
-        props.push({ kind: "bush", x, y, r: 12, solid: false, hp: 1, gathered: 0 });
-      }
+      props.push({ kind: "bush", x, y, r: 12, solid: false, hp: 1, node: "bush" });
     }
-
-    // Rocks / scrap spots
-    for (let i = 0; i < 18; i++) {
-      const x = 80 + rnd() * (WORLD_W - 160);
-      const y = 80 + rnd() * (WORLD_H - 160);
+    const rockKinds = ["copper_rock", "tin_rock", "iron_rock", "scrapheap"];
+    for (let i = 0; i < 36; i++) {
+      const x = 80 + rnd() * (WORLD_W - 160), y = 80 + rnd() * (WORLD_H - 160);
       if (Math.hypot(x - cx, y - cy) < 120) continue;
-      props.push({ kind: "scrapheap", x, y, r: 14, solid: false, hp: 2, gathered: 0 });
+      const kind = rockKinds[Math.floor(rnd() * rockKinds.length)];
+      props.push({ kind, x, y, r: 14, solid: true, hp: kind === "iron_rock" ? 4 : 3, node: kind });
     }
+    // fishing spots near "pond" area
+    for (let i = 0; i < 6; i++) {
+      props.push({
+        kind: "fish_spot", x: cx - 200 + rnd() * 80, y: cy + 400 + rnd() * 60,
+        r: 16, solid: false, hp: 99, node: "fish_spot", infinite: true,
+      });
+    }
+    // pond visual markers
+    props.push({ kind: "pond", x: cx - 160, y: cy + 430, w: 120, h: 70, solid: false });
 
-    // Starter loot near camp
     lootPiles.push({
-      x: cx + 40, y: cy - 30,
-      items: [{ id: "cloth", qty: 2 }, { id: "water", qty: 1 }, { id: "plank", qty: 2 }],
+      x: cx + 45, y: cy - 35,
+      items: [{ id: "cloth", qty: 2 }, { id: "water", qty: 1 }, { id: "feather", qty: 3 }, { id: "string", qty: 1 }],
       life: 99999,
     });
 
-    // Zombies
-    for (let i = 0; i < 28; i++) {
-      let x, y, tries = 0;
-      do {
-        x = 100 + rnd() * (WORLD_W - 200);
-        y = 100 + rnd() * (WORLD_H - 200);
-        tries++;
-      } while ((Math.hypot(x - cx, y - cy) < 220 || insideAnyBuilding(x, y, buildings, 10)) && tries < 40);
-      zombies.push(makeZombie(x, y, rnd));
+    for (let i = 0; i < 22; i++) {
+      let x, y, t = 0;
+      do { x = 100 + rnd() * (WORLD_W - 200); y = 100 + rnd() * (WORLD_H - 200); t++; }
+      while ((Math.hypot(x - cx, y - cy) < 240 || nearBuilding(x, y, buildings, 20)) && t < 40);
+      creatures.push(makeCreature("zombie", x, y, rnd));
     }
+    for (let i = 0; i < 10; i++) creatures.push(makeCreature("rat", cx - 350 + rnd() * 80, cy - 40 + rnd() * 80, rnd));
+    for (let i = 0; i < 8; i++) creatures.push(makeCreature("squirrel", 200 + rnd() * (WORLD_W - 400), 200 + rnd() * (WORLD_H - 400), rnd));
+    for (let i = 0; i < 8; i++) creatures.push(makeCreature("chicken", 200 + rnd() * (WORLD_W - 400), 200 + rnd() * (WORLD_H - 400), rnd));
 
-    return { props, zombies, lootPiles, spawn: { x: cx, y: cy + 40 } };
+    return { props, creatures, lootPiles, spawn: { x: cx, y: cy + 45 } };
   }
 
-  function insideAnyBuilding(x, y, buildings, pad) {
-    pad = pad || 0;
+  function nearBuilding(x, y, buildings, pad) {
     for (const b of buildings) {
       if (x > b.x - pad && x < b.x + b.w + pad && y > b.y - pad && y < b.y + b.h + pad) return true;
     }
     return false;
   }
-
-  function pickCrateLoot(rnd) {
+  function pickLoot(rnd) {
     const pool = [
-      [{ id: "canned", qty: 1 }],
-      [{ id: "cloth", qty: 2 }],
-      [{ id: "scrap", qty: 2 }],
-      [{ id: "nails", qty: 3 }],
-      [{ id: "plank", qty: 2 }],
-      [{ id: "bandage", qty: 1 }],
-      [{ id: "water", qty: 1 }, { id: "berries", qty: 2 }],
-      [{ id: "wood", qty: 3 }],
+      [{ id: "canned", qty: 1 }], [{ id: "cloth", qty: 2 }], [{ id: "scrap", qty: 2 }],
+      [{ id: "copper_ore", qty: 1 }], [{ id: "hoodie", qty: 1 }], [{ id: "jeans", qty: 1 }],
+      [{ id: "hiking_boots", qty: 1 }], [{ id: "feather", qty: 2 }], [{ id: "water", qty: 1 }],
     ];
-    return pool[Math.floor(rnd() * pool.length)].map((x) => ({ ...x }));
+    return pool[Math.floor(rnd() * pool.length)].map((x) => Object.assign({}, x));
   }
 
-  function makeZombie(x, y, rnd) {
-    const r = rnd || Math.random;
-    return {
-      id: Math.floor(r() * 1e9),
-      x, y,
-      vx: 0, vy: 0,
-      r: ZOMBIE_R,
-      hp: 28 + Math.floor(r() * 20),
-      maxHp: 40,
-      speed: ZOMBIE_SPEED * (0.85 + r() * 0.3),
-      attackCd: 0,
-      wanderT: r() * 3,
-      wx: x, wy: y,
-      alive: true,
-      hitFlash: 0,
-    };
-  }
 
-  // ═══════════════════════════════════════════════════════════
-  // PERSISTENCE
-  // ═══════════════════════════════════════════════════════════
+  // ── Persistence ──
   function serialize() {
     return {
-      v: 2,
-      seed: state.seed,
-      day: state.day,
-      dayTimer: state.dayTimer,
-      time: state.time,
+      v: 3, seed: state.seed, day: state.day, dayTimer: state.dayTimer, time: state.time,
       player: {
-        x: state.player.x, y: state.player.y,
-        hp: state.player.hp, maxHp: state.player.maxHp,
-        hunger: state.player.hunger,
-        weapon: state.player.weapon,
-        inv: state.player.inv,
-        skills: state.player.skills,
-        kills: state.player.kills,
+        x: state.player.x, y: state.player.y, hp: state.player.hp, maxHp: state.player.maxHp,
+        hunger: state.player.hunger, inv: state.player.inv, skills: state.player.skills,
+        equip: state.player.equip, kills: state.player.kills,
       },
-      zombies: state.zombies.filter((z) => z.alive).map((z) => ({
-        id: z.id, x: z.x, y: z.y, hp: z.hp, speed: z.speed,
+      creatures: state.creatures.filter((c) => c.alive).map((c) => ({
+        id: c.id, type: c.type, x: c.x, y: c.y, hp: c.hp, speed: c.speed,
       })),
       props: state.props.map((p) => ({
-        kind: p.kind, x: p.x, y: p.y, w: p.w, h: p.h, r: p.r,
-        solid: p.solid, hp: p.hp, gathered: p.gathered, loot: p.loot,
-        base: p.base || null,
+        kind: p.kind, x: p.x, y: p.y, w: p.w, h: p.h, r: p.r, solid: p.solid,
+        hp: p.hp, node: p.node, loot: p.loot, base: p.base || null, cook: p.cook,
+        infinite: p.infinite, goblinHut: p.goblinHut,
       })),
-      lootPiles: state.lootPiles,
-      tutorialShown: state.tutorialShown,
+      lootPiles: state.lootPiles, tutorialShown: state.tutorialShown,
     };
   }
-
-  function normalizeLoadedProps(props) {
+  function normalizeProps(props) {
     return (props || []).map((p) => {
       const out = Object.assign({}, p);
       if (out.kind === "building") {
         out.base = Object.assign(defaultBase(), out.base || {});
         if (!Array.isArray(out.base.stash)) out.base.stash = [];
       }
+      if (!out.node && NODE_DEFS[out.kind]) out.node = out.kind;
       return out;
     });
   }
-
   function saveGame(silent) {
     if (!state.player) return;
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify(serialize()));
-      try { localStorage.removeItem(SAVE_KEY_LEGACY); } catch (e2) { /* ignore */ }
-      if (!silent) toast("Game saved");
-    } catch (e) {
-      toast("Save failed (storage full?)");
-    }
+      for (const k of SAVE_KEY_LEGACY) try { localStorage.removeItem(k); } catch (e) {}
+      if (!silent) toast("Game saved", "sys");
+    } catch (e) { toast("Save failed", "bad"); }
   }
-
   function loadRaw() {
     try {
       let raw = localStorage.getItem(SAVE_KEY);
-      if (raw) return JSON.parse(raw);
-      raw = localStorage.getItem(SAVE_KEY_LEGACY);
+      if (!raw) {
+        for (const k of SAVE_KEY_LEGACY) {
+          raw = localStorage.getItem(k);
+          if (raw) break;
+        }
+      }
       if (!raw) return null;
       const data = JSON.parse(raw);
-      data.v = 2;
       if (data.player) data.player.skills = migrateSkills(data.player.skills);
-      data.props = normalizeLoadedProps(data.props);
+      if (data.player && !data.player.equip) {
+        data.player.equip = emptyEquip();
+        if (data.player.weapon) data.player.equip.weapon = data.player.weapon;
+      }
+      // v1/v2 zombies → creatures
+      if (!data.creatures && data.zombies) {
+        data.creatures = data.zombies.map((z) => ({ id: z.id, type: "zombie", x: z.x, y: z.y, hp: z.hp, speed: z.speed }));
+      }
+      data.props = normalizeProps(data.props);
+      data.v = 3;
       return data;
     } catch (e) { return null; }
   }
-
   function loadGame() {
-    try {
-      const data = loadRaw();
-      if (!data || !data.player) return false;
-      state.seed = data.seed;
-      state.day = data.day || 1;
-      state.dayTimer = data.dayTimer || 0;
-      state.time = data.time || 0;
-      state.tutorialShown = !!data.tutorialShown;
-      state.props = normalizeLoadedProps(data.props);
-      state.lootPiles = data.lootPiles || [];
-      state.zombies = (data.zombies || []).map((z) => {
-        const zz = makeZombie(z.x, z.y);
-        zz.id = z.id; zz.hp = z.hp; zz.speed = z.speed; zz.alive = true;
-        return zz;
-      });
-      const p = createPlayer(data.player.x, data.player.y, data.player.skills);
-      Object.assign(p, {
-        hp: data.player.hp,
-        maxHp: data.player.maxHp || 100,
-        hunger: data.player.hunger,
-        weapon: data.player.weapon,
-        inv: data.player.inv || [],
-        kills: data.player.kills || 0,
-      });
-      state.player = p;
-      state.particles = [];
-      state.floatTexts = [];
-      state.tapMarkers = [];
-      return true;
-    } catch (e) {
-      return false;
-    }
+    const data = loadRaw();
+    if (!data || !data.player) return false;
+    state.seed = data.seed; state.day = data.day || 1; state.dayTimer = data.dayTimer || 0;
+    state.time = data.time || 0; state.tutorialShown = !!data.tutorialShown;
+    state.props = normalizeProps(data.props);
+    state.lootPiles = data.lootPiles || [];
+    state.creatures = (data.creatures || []).map((c) => {
+      const cc = makeCreature(c.type || "zombie", c.x, c.y);
+      cc.id = c.id; cc.hp = c.hp; if (c.speed) cc.speed = c.speed; return cc;
+    });
+    const p = createPlayer(data.player.x, data.player.y, data.player.skills, data.player.equip);
+    Object.assign(p, {
+      hp: data.player.hp, maxHp: data.player.maxHp || p.maxHp,
+      hunger: data.player.hunger, inv: data.player.inv || [], kills: data.player.kills || 0,
+    });
+    syncWeaponAlias(p);
+    state.player = p;
+    state.particles = []; state.floatTexts = []; state.tapMarkers = []; state.projectiles = [];
+    return true;
   }
-
   function hasSave() {
-    try { return !!(localStorage.getItem(SAVE_KEY) || localStorage.getItem(SAVE_KEY_LEGACY)); } catch (e) { return false; }
+    try {
+      if (localStorage.getItem(SAVE_KEY)) return true;
+      return SAVE_KEY_LEGACY.some((k) => !!localStorage.getItem(k));
+    } catch (e) { return false; }
   }
-
   function resetSave() {
     try {
       localStorage.removeItem(SAVE_KEY);
-      localStorage.removeItem(SAVE_KEY_LEGACY);
-    } catch (e) { /* ignore */ }
+      for (const k of SAVE_KEY_LEGACY) localStorage.removeItem(k);
+    } catch (e) {}
   }
-
   function startNewGame() {
     state.seed = (Date.now() ^ (Math.random() * 1e9)) >>> 0;
     const world = generateWorld(state.seed);
-    state.props = world.props;
-    state.zombies = world.zombies;
-    state.lootPiles = world.lootPiles;
+    state.props = world.props; state.creatures = world.creatures; state.lootPiles = world.lootPiles;
     state.player = createPlayer(world.spawn.x, world.spawn.y);
-    state.player.weapon = "knife";
-    state.day = 1;
-    state.dayTimer = 0;
-    state.time = 0;
-    state.particles = [];
-    state.floatTexts = [];
-    state.tapMarkers = [];
-    state.deathTimer = 0;
-    state.tutorialShown = false;
-    state.running = true;
-    state.paused = false;
+    state.player.equip.weapon = "knife";
+    syncWeaponAlias(state.player);
+    state.day = 1; state.dayTimer = 0; state.time = 0;
+    state.particles = []; state.floatTexts = []; state.tapMarkers = []; state.projectiles = [];
+    state.msgLog = []; state.deathTimer = 0; state.tutorialShown = false;
+    state.running = true; state.paused = false; state.contextMenu = null;
+    logMsg("Welcome to Ashen Vale. Long-press for actions.", "sys");
     saveGame(true);
   }
 
-
-  function canAfford(need) {
-    return Object.keys(need).every((id) => invCount(state.player.inv, id) >= need[id]);
-  }
-  function payNeed(need) {
-    for (const [id, q] of Object.entries(need)) invRemove(state.player.inv, id, q);
-  }
+  // ── Base actions ──
   function claimBuilding(b) {
     if (!b || b.kind !== "building") return false;
-    if (!pointInBuilding(state.player.x, state.player.y, b)) { toast("Stand inside to claim"); return false; }
-    if (b.base.claimed) { toast("Already claimed"); return false; }
+    if (!pointInBuilding(state.player.x, state.player.y, b)) { toast("Stand inside to claim", "bad"); return false; }
+    if (b.base.claimed) { toast("Already claimed", "sys"); return false; }
     b.base.claimed = true; b.base.type = "none"; b.base.wallHp = 20; b.base.wallMax = 20;
+    if (b.goblinHut) toast("Claimed a goblin hut!", "good");
     gainXp(state.player, "construction", 15);
-    toast("Building claimed — choose a type");
-    saveGame(true);
-    return true;
+    toast("Building claimed — set a type in Build tab", "good");
+    saveGame(true); return true;
   }
   function setBuildingType(b, type) {
     const def = BUILDING_TYPES[type];
     if (!b || !b.base || !b.base.claimed || !def || type === "none") return false;
-    if (state.player.skills.construction.level < (def.skill || 1)) { toast("Need Construction " + def.skill); return false; }
-    for (const other of buildingsList()) {
-      if (other !== b && other.base && other.base.type === type) { toast("You already have a " + def.name); return false; }
-    }
+    if (state.player.skills.construction.level < (def.skill || 1)) { toast("Need Construction " + def.skill, "bad"); return false; }
+    for (const o of buildingsList()) if (o !== b && o.base && o.base.type === type) { toast("Already have a " + def.name, "bad"); return false; }
     b.base.type = type;
+    if (type === "workshop") { b.base.hasForge = true; b.base.hasAnvil = true; }
     gainXp(state.player, "construction", 20);
-    toast("Designated as " + def.name);
-    saveGame(true);
-    return true;
+    toast("Designated as " + def.name, "good");
+    saveGame(true); return true;
   }
   function doFortify(b, key) {
     const f = FORTIFY[key];
     if (!f || !b || !b.base || !b.base.claimed) return false;
     const p = state.player;
-    if (p.skills.construction.level < f.skill) { toast("Need Construction " + f.skill); return false; }
-    if (!canAfford(f.need)) { toast("Need more planks/nails"); return false; }
-    if (key === "board" && b.base.boarded) { toast("Windows already boarded"); return false; }
-    if (key === "door" && b.base.doorReinforced) { toast("Door already reinforced"); return false; }
-    if (key === "walls" && b.base.braced) { toast("Walls already braced"); return false; }
-    if (key === "repair" && b.base.wallHp >= b.base.wallMax) { toast("Already at full fort HP"); return false; }
-    payNeed(f.need);
+    if (p.skills.construction.level < f.skill) { toast("Need Construction " + f.skill, "bad"); return false; }
+    if (!canAfford(p.inv, f.need)) { toast("Need: " + Object.entries(f.need).map(([id,q]) => ITEM_DEFS[id].name + "×" + q).join(", "), "bad"); return false; }
+    if (key === "board" && b.base.boarded) { toast("Already boarded", "sys"); return false; }
+    if (key === "door" && b.base.doorReinforced) { toast("Door already reinforced", "sys"); return false; }
+    if (key === "walls" && b.base.braced) { toast("Walls already braced", "sys"); return false; }
+    if (key === "repair" && b.base.wallHp >= b.base.wallMax) { toast("Already full fort HP", "sys"); return false; }
+    payNeed(p.inv, f.need);
     if (f.repair) b.base.wallHp = Math.min(b.base.wallMax, b.base.wallHp + f.repair);
     else {
       if (key === "board") b.base.boarded = true;
@@ -546,317 +377,155 @@
       b.base.wallHp = Math.min(b.base.wallMax, b.base.wallHp + f.addWall);
     }
     gainXp(p, "construction", f.xp);
-    toast(f.label + " done");
+    toast(f.label + " — done!", "good");
+    saveGame(true); return true;
+  }
+
+  function recipeBlocked(r, p) {
+    if ((p.skills[r.skill] || { level: 1 }).level < r.level) return "Need " + SKILL_LABELS[r.skill] + " " + r.level;
+    if (r.workshop && !hasWorkshop()) return "Need a Workshop";
+    if (r.kitchen && !hasKitchen()) return "Need a Kitchen";
+    if (r.forge && !hasForgeAccess()) return "Need a forge (Workshop or world forge)";
+    if (r.anvil && !hasAnvilAccess()) return "Need an anvil (Workshop)";
+    if (!canAfford(p.inv, r.need)) {
+      return "Need " + Object.entries(r.need).map(([id, q]) => ITEM_DEFS[id].name + " " + invCount(p.inv, id) + "/" + q).join(", ");
+    }
+    return null;
+  }
+
+  function doCraft(recipeId) {
+    const r = RECIPES.find((x) => x.id === recipeId);
+    if (!r || !state.player) return { ok: false, msg: "Unknown recipe" };
+    const block = recipeBlocked(r, state.player);
+    if (block) { toast(block, "bad"); return { ok: false, msg: block }; }
+    payNeed(state.player.inv, r.need, r.keep);
+    invAdd(state.player.inv, r.out.id, r.out.qty, MAX_INV);
+    gainXp(state.player, r.skill, r.xp);
+    const msg = "Made " + ITEM_DEFS[r.out.id].name + (r.out.qty > 1 ? " ×" + r.out.qty : "");
+    toast(msg, "good");
+    saveGame(true);
+    return { ok: true, msg };
+  }
+
+
+  // ── Actions: gather / attack / loot ──
+  function tryGather(p, prop) {
+    if (p.gatherCd > 0) return;
+    if (prop.kind === "campfire" || prop.kind === "forge") {
+      // open craft cook/smith via workshop panel hint
+      openWorkshop(prop.kind === "forge" ? "smith" : "craft");
+      p.target = null;
+      return;
+    }
+    if (prop.kind === "building" || prop.kind === "pond") { p.target = null; return; }
+    if (prop.kind === "crate") {
+      p.gatherCd = 0.5;
+      prop.hp = 0; prop.solid = false;
+      if (prop.loot) for (const it of prop.loot) invAdd(p.inv, it.id, it.qty, MAX_INV);
+      floatText(prop.x, prop.y - 16, "Loot!", "#e8c860");
+      gainXp(p, "fitness", 2);
+      toast("Crate looted", "good");
+      p.target = null;
+      return;
+    }
+    const nodeKey = prop.node || prop.kind;
+    const nd = NODE_DEFS[nodeKey];
+    if (!nd) { p.target = null; return; }
+    if (nd.tool) {
+      const tier = bestToolTier(p.inv, p.equip, nd.tool);
+      if (tier < nd.tier) {
+        toast("Need " + nd.tool + " tier " + nd.tier + "+ (bronze/iron/steel)", "bad");
+        p.target = null;
+        return;
+      }
+    }
+    p.gatherCd = Math.max(0.35, 0.85 - bestToolTier(p.inv, p.equip, nd.tool || "axe") * 0.12);
+    if (!prop.infinite) prop.hp = (prop.hp || 1) - 1;
+    for (const d of nd.drops) {
+      const lo = d.qty[0], hi = d.qty[1];
+      const qty = lo + Math.floor(Math.random() * (hi - lo + 1));
+      if (qty > 0) {
+        invAdd(p.inv, d.id, qty, MAX_INV);
+        floatText(prop.x, prop.y - 14, "+" + ITEM_DEFS[d.id].name, "#a8d4a0");
+      }
+    }
+    gainXp(p, nd.skill, nd.xp);
+    gainXp(p, "fitness", 1);
+    if (!prop.infinite && prop.hp <= 0) {
+      prop.solid = false; prop.gathered = 1;
+      toast(nd.label + " depleted", "sys");
+      p.target = null;
+    }
+  }
+
+  function tryCookAtFire(p) {
+    // cook one raw fish or meat from inventory
+    const raw = invCount(p.inv, "raw_fish") > 0 ? "raw_fish" : (invCount(p.inv, "raw_meat") > 0 ? "raw_meat" : null);
+    if (!raw) { toast("No raw fish/meat to cook", "bad"); return false; }
+    invRemove(p.inv, raw, 1);
+    const outcome = cookOutcome(p.skills.cooking.level);
+    if (outcome === "burn") {
+      invAdd(p.inv, "burned_food", 1, MAX_INV);
+      gainXp(p, "cooking", 4);
+      toast("Burnt the food…", "bad");
+    } else {
+      const out = raw === "raw_fish" ? "fish" : "meat";
+      invAdd(p.inv, out, 1, MAX_INV);
+      gainXp(p, "cooking", 18);
+      toast("Cooked " + ITEM_DEFS[out].name, "good");
+    }
     saveGame(true);
     return true;
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // UPDATE
-  // ═══════════════════════════════════════════════════════════
-  function update(dt) {
-    if (!state.running || state.paused || !state.player) return;
-
-    if (state.deathTimer > 0) {
-      state.deathTimer -= dt;
-      if (state.deathTimer <= 0) {
-        respawnPlayer();
-        document.getElementById("death-banner").classList.remove("show");
-      }
+  function tryAttack(p, c) {
+    if (p.attackCd > 0) return;
+    const bow = p.equip.weapon && ITEM_DEFS[p.equip.weapon] && ITEM_DEFS[p.equip.weapon].style === "ranged";
+    const d = dist(p, c);
+    if (bow) {
+      const range = ITEM_DEFS[p.equip.weapon].range || 200;
+      if (d > range) return;
+      if (!p.equip.ammo || invCount(p.inv, p.equip.ammo) <= 0) { toast("No arrows equipped!", "bad"); return; }
+      if (!consumeAmmo(p)) { toast("Out of arrows", "bad"); return; }
+      p.attackCd = 0.7;
+      const base = rangedDamage(p.equip);
+      const bonus = 1 + (p.skills.ranged.level - 1) * 0.07;
+      const dmg = Math.round(base * bonus * (0.85 + Math.random() * 0.3));
+      state.projectiles.push({
+        x: p.x, y: p.y, tx: c.x, ty: c.y, targetId: c.id, dmg, life: 0.35, color: "#e8c860",
+      });
+      gainXp(p, "ranged", 5);
+      gainXp(p, "fitness", 1);
       return;
     }
-
-    state.time += dt;
-    state.dayTimer += dt;
-    if (state.dayTimer >= DAY_LEN) {
-      state.dayTimer -= DAY_LEN;
-      state.day += 1;
-      toast(`Day ${state.day} begins…`);
-      // night brings a few more zombies far from camp
-      spawnNightZombies();
-    }
-
-    const p = state.player;
-    if (!p.alive) return;
-
-    // Hunger
-    p.hunger = Math.max(0, p.hunger - HUNGER_RATE * dt);
-    if (p.hunger <= 0) {
-      p.hp -= 2.5 * dt;
-    } else if (p.hunger > 60 && p.hp < p.maxHp) {
-      p.hp = Math.min(p.maxHp, p.hp + 1.2 * dt);
-    }
-    const insideB = playerBuilding();
-    if (insideB && insideB.base && insideB.base.type === "safehouse" && insideB.base.wallHp > 0) {
-      p.hp = Math.min(p.maxHp, p.hp + 3.5 * dt);
-    }
-
-    p.attackCd = Math.max(0, p.attackCd - dt);
-    p.gatherCd = Math.max(0, p.gatherCd - dt);
-
-    // Movement toward target
-    if (p.target) {
-      if (p.target.zombieId != null) {
-        const z = state.zombies.find((zz) => zz.id === p.target.zombieId && zz.alive);
-        if (!z) { p.target = null; }
-        else {
-          const d = dist(p, z);
-          if (d <= ATTACK_RANGE) {
-            p.vx = 0; p.vy = 0;
-            tryAttack(p, z);
-          } else {
-            moveToward(p, z.x, z.y, moveSpeed(p), dt);
-          }
-        }
-      } else if (p.target.propId != null) {
-        const prop = state.props[p.target.propId];
-        if (!prop || (prop.hp != null && prop.hp <= 0)) { p.target = null; }
-        else {
-          const px = propCenter(prop);
-          const d = dist(p, px);
-          if (d <= GATHER_RANGE) {
-            p.vx = 0; p.vy = 0;
-            tryGather(p, prop, p.target.propId);
-          } else {
-            moveToward(p, px.x, px.y, moveSpeed(p), dt);
-          }
-        }
-      } else if (p.target.lootId != null) {
-        const pile = state.lootPiles[p.target.lootId];
-        if (!pile) { p.target = null; }
-        else {
-          const d = dist(p, pile);
-          if (d <= GATHER_RANGE) {
-            p.vx = 0; p.vy = 0;
-            pickupLoot(p, p.target.lootId);
-            p.target = null;
-          } else {
-            moveToward(p, pile.x, pile.y, moveSpeed(p), dt);
-          }
-        }
-      } else {
-        const d = Math.hypot(p.target.x - p.x, p.target.y - p.y);
-        if (d < 4) {
-          p.x = p.target.x; p.y = p.target.y;
-          p.vx = 0; p.vy = 0;
-          p.target = null;
-        } else {
-          moveToward(p, p.target.x, p.target.y, moveSpeed(p), dt);
-        }
-      }
-    } else {
-      p.vx = 0; p.vy = 0;
-    }
-
-    // Resolve player position vs solids
-    resolveSolid(p);
-
-    // Zombies — attack nearby fortifications, else chase player
-    for (const z of state.zombies) {
-      if (!z.alive) continue;
-      z.hitFlash = Math.max(0, z.hitFlash - dt);
-      z.attackCd = Math.max(0, z.attackCd - dt);
-      const d = dist(z, p);
-      let fort = null, fortDist = 9999;
-      for (const b of buildingsList()) {
-        if (!b.base || !b.base.claimed || b.base.wallHp <= 0) continue;
-        const c = buildingCenter(b);
-        if (dist(p, c) > 220) continue;
-        const fd = dist(z, c);
-        if (fd < fortDist) { fortDist = fd; fort = b; }
-      }
-      if (fort && fortDist < AGRO_RANGE + 40 && d > 70) {
-        const door = { x: fort.x + fort.w / 2, y: fort.y + fort.h + 4 };
-        if (dist(z, door) > 18) moveToward(z, door.x, door.y, z.speed, dt);
-        else if (z.attackCd <= 0) {
-          z.attackCd = 1.0;
-          const dmg = 4 + Math.floor(Math.random() * 4);
-          fort.base.wallHp = Math.max(0, fort.base.wallHp - dmg);
-          floatText(door.x, door.y - 10, `-${dmg}`, "#e0b45a");
-          if (fort.base.wallHp <= 0) toast("Barricade broken!");
-        }
-      } else if (d < AGRO_RANGE) {
-        moveToward(z, p.x, p.y, z.speed, dt);
-        if (d < z.r + p.r + 4 && z.attackCd <= 0) {
-          const ib = playerBuilding();
-          if (ib && ib.base && ib.base.claimed && ib.base.wallHp > 0) {
-            z.attackCd = 1.1;
-            const dmg = 3 + Math.floor(Math.random() * 3);
-            ib.base.wallHp = Math.max(0, ib.base.wallHp - dmg);
-            floatText(ib.x + ib.w / 2, ib.y, `wall -${dmg}`, "#e0b45a");
-          } else {
-            z.attackCd = 1.1;
-            const dmg = 6 + Math.floor(Math.random() * 5);
-            p.hp -= dmg;
-            floatText(p.x, p.y - 20, `-${dmg}`, "#e05a5a");
-            burst(p.x, p.y, "#e05a5a", 6);
-            if (p.hp <= 0) { playerDie(); break; }
-          }
-        }
-      } else {
-        z.wanderT -= dt;
-        if (z.wanderT <= 0) {
-          z.wanderT = 2 + Math.random() * 3;
-          z.wx = clamp(z.x + (Math.random() - 0.5) * 120, 40, WORLD_W - 40);
-          z.wy = clamp(z.y + (Math.random() - 0.5) * 120, 40, WORLD_H - 40);
-        }
-        moveToward(z, z.wx, z.wy, z.speed * 0.35, dt);
-      }
-      resolveSolid(z);
-    }
-
-    // Particles / float text
-    for (let i = state.particles.length - 1; i >= 0; i--) {
-      const pt = state.particles[i];
-      pt.life -= dt;
-      pt.x += pt.vx * dt;
-      pt.y += pt.vy * dt;
-      pt.vy += 40 * dt;
-      if (pt.life <= 0) state.particles.splice(i, 1);
-    }
-    for (let i = state.floatTexts.length - 1; i >= 0; i--) {
-      const ft = state.floatTexts[i];
-      ft.life -= dt;
-      ft.y -= 20 * dt;
-      if (ft.life <= 0) state.floatTexts.splice(i, 1);
-    }
-    for (let i = state.tapMarkers.length - 1; i >= 0; i--) {
-      state.tapMarkers[i].life -= dt;
-      if (state.tapMarkers[i].life <= 0) state.tapMarkers.splice(i, 1);
-    }
-
-    if (state.toastTimer > 0) {
-      state.toastTimer -= dt;
-      if (state.toastTimer <= 0) {
-        document.getElementById("toast").classList.remove("show");
-      }
-    }
-
-    // Autosave every ~20s
-    if (Math.floor(state.time / 20) !== Math.floor((state.time - dt) / 20)) {
-      saveGame(true);
-    }
-
-    updateHud();
-  }
-
-  function moveToward(ent, tx, ty, speed, dt) {
-    const dx = tx - ent.x, dy = ty - ent.y;
-    const d = Math.hypot(dx, dy) || 1;
-    ent.facing = Math.atan2(dy, dx);
-    const step = Math.min(speed * dt, d);
-    ent.x += (dx / d) * step;
-    ent.y += (dy / d) * step;
-    ent.x = clamp(ent.x, 20, WORLD_W - 20);
-    ent.y = clamp(ent.y, 20, WORLD_H - 20);
-  }
-
-  function propCenter(prop) {
-    if (prop.kind === "building") {
-      return { x: prop.x + prop.w / 2, y: prop.y + prop.h / 2 };
-    }
-    return { x: prop.x, y: prop.y };
-  }
-
-  function resolveSolid(ent) {
-    for (const prop of state.props) {
-      if (!prop.solid) continue;
-      if (prop.kind === "building") {
-        // Enterable interiors; fortification is HP-based, not a physics wall.
-        continue;
-      } else if (prop.r) {
-        const d = dist(ent, prop);
-        const minD = ent.r + prop.r * 0.7;
-        if (d < minD && d > 0) {
-          const push = (minD - d) / d;
-          ent.x += (ent.x - prop.x) * push;
-          ent.y += (ent.y - prop.y) * push;
-        }
-      }
-    }
-  }
-
-  function tryAttack(p, z) {
-    if (p.attackCd > 0) return;
+    if (d > ATTACK_RANGE) return;
     p.attackCd = 0.55;
-    const base = weaponDmg(p);
+    const base = meleeDamage(p.equip);
     const bonus = 1 + (p.skills.combat.level - 1) * 0.08;
     const dmg = Math.round(base * bonus * (0.85 + Math.random() * 0.3));
-    z.hp -= dmg;
-    z.hitFlash = 0.15;
-    floatText(z.x, z.y - 18, `-${dmg}`, "#ffe08a");
-    burst(z.x, z.y, "#7ecf8a", 5);
+    applyDamageToCreature(c, dmg, p);
     gainXp(p, "combat", 4 + Math.floor(dmg / 5));
     gainXp(p, "fitness", 1);
-    if (z.hp <= 0) {
-      z.alive = false;
-      p.kills += 1;
-      toast("Zombie down");
-      // chance to drop scrap/cloth
-      if (Math.random() < 0.45) {
-        const drop = Math.random() < 0.5 ? { id: "cloth", qty: 1 } : { id: "scrap", qty: 1 };
-        state.lootPiles.push({ x: z.x, y: z.y, items: [drop], life: 120 });
-      }
-      gainXp(p, "combat", 10);
-    }
   }
 
-  function tryGather(p, prop, idx) {
-    if (p.gatherCd > 0) return;
-    if (prop.kind === "building" || prop.kind === "campfire") {
-      p.target = null;
-      return;
-    }
-    p.gatherCd = 0.7;
-    const forageBonus = p.skills.foraging.level;
-
-    if (prop.kind === "tree") {
-      prop.hp -= 1;
-      invAdd(p.inv, "wood", 1);
-      if (Math.random() < 0.35 + forageBonus * 0.03) invAdd(p.inv, "stick", 1);
-      floatText(prop.x, prop.y - 16, "+wood", "#a8d4a0");
-      gainXp(p, "foraging", 5);
-      gainXp(p, "fitness", 2);
-      if (prop.hp <= 0) {
-        prop.solid = false;
-        prop.gathered = 1;
-        toast("Tree felled");
-        p.target = null;
+  function applyDamageToCreature(c, dmg, p) {
+    c.hp -= dmg; c.hitFlash = 0.15;
+    floatText(c.x, c.y - 16, "-" + dmg, "#ffe08a");
+    burst(c.x, c.y, "#7ecf8a", 4);
+    if (c.hp <= 0) {
+      c.alive = false;
+      p.kills += 1;
+      const def = CREATURE_DEFS[c.type];
+      toast(def.name + " down", "good");
+      gainXp(p, c.type === "zombie" || c.type === "goblin" || c.type === "rat" ? "combat" : "fitness", def.xp);
+      const drops = [];
+      for (const d of def.drops || []) {
+        if (Math.random() < d.c) {
+          const q = d.qty ? d.qty[0] + Math.floor(Math.random() * (d.qty[1] - d.qty[0] + 1)) : 1;
+          if (q > 0) drops.push({ id: d.id, qty: q });
+        }
       }
-    } else if (prop.kind === "bush") {
-      prop.hp = 0;
-      prop.gathered = 1;
-      const qty = 1 + (Math.random() < 0.3 + forageBonus * 0.04 ? 1 : 0);
-      invAdd(p.inv, "berries", qty);
-      floatText(prop.x, prop.y - 16, "+berries", "#d48ad0");
-      gainXp(p, "foraging", 6);
-      toast("Picked berries");
-      p.target = null;
-    } else if (prop.kind === "crate") {
-      prop.hp = 0;
-      prop.solid = false;
-      if (prop.loot) {
-        for (const it of prop.loot) invAdd(p.inv, it.id, it.qty);
-        state.lootPiles.push({ x: prop.x, y: prop.y, items: prop.loot.map((x) => ({ ...x })), life: 0.01 });
-        // immediately try pickup into inv already done; clear tiny pile
-        state.lootPiles.pop();
-      }
-      floatText(prop.x, prop.y - 16, "Loot!", "#e0b45a");
-      gainXp(p, "foraging", 8);
-      toast("Crate looted");
-      p.target = null;
-    } else if (prop.kind === "scrapheap") {
-      prop.hp -= 1;
-      invAdd(p.inv, "scrap", 1);
-      if (Math.random() < 0.2) invAdd(p.inv, "cloth", 1);
-      if (Math.random() < 0.25) invAdd(p.inv, "nails", 1);
-      floatText(prop.x, prop.y - 16, "+scrap", "#9aa0a8");
-      gainXp(p, "foraging", 5);
-      if (prop.hp <= 0) {
-        prop.gathered = 1;
-        p.target = null;
-        toast("Scrap pile cleared");
-      }
+      if (drops.length) state.lootPiles.push({ x: c.x, y: c.y, items: drops, life: 180 });
     }
   }
 
@@ -866,40 +535,28 @@
     const left = [];
     for (const it of pile.items) {
       const before = invCount(p.inv, it.id);
-      invAdd(p.inv, it.id, it.qty);
-      const after = invCount(p.inv, it.id);
-      const took = after - before;
+      invAdd(p.inv, it.id, it.qty, MAX_INV);
+      const took = invCount(p.inv, it.id) - before;
       if (took < it.qty) left.push({ id: it.id, qty: it.qty - took });
     }
-    if (left.length) {
-      pile.items = left;
-      toast("Bag full — some left on ground");
-    } else {
-      state.lootPiles.splice(idx, 1);
-      toast("Loot picked up");
-    }
+    if (left.length) { pile.items = left; toast("Bag full — some left", "bad"); }
+    else { state.lootPiles.splice(idx, 1); toast("Picked up loot", "good"); }
   }
 
   function playerDie() {
     const p = state.player;
-    p.alive = false;
-    p.hp = 0;
-    // Drop inventory as loot pile
-    if (p.inv.length) {
-      state.lootPiles.push({
-        x: p.x,
-        y: p.y,
-        items: p.inv.map((it) => ({ id: it.id, qty: it.qty })),
-        life: 99999,
-        deathDrop: true,
-      });
+    p.alive = false; p.hp = 0;
+    // Drop bag but keep equipped? Spec: death drops carried items — drop inv, keep equip visually unequipped into drop too for fairness like before
+    const drop = p.inv.map((it) => ({ id: it.id, qty: it.qty }));
+    for (const slot of EQUIP_SLOTS) {
+      if (p.equip[slot] && !drop.some((d) => d.id === p.equip[slot])) drop.push({ id: p.equip[slot], qty: 1 });
+      p.equip[slot] = null;
     }
-    p.inv = [];
-    p.weapon = null;
-    p.target = null;
+    if (drop.length) state.lootPiles.push({ x: p.x, y: p.y, items: drop, life: 99999, deathDrop: true });
+    p.inv = []; p.target = null; syncWeaponAlias(p);
     state.deathTimer = 2.8;
     document.getElementById("death-banner").classList.add("show");
-    toast("You died — skills kept, gear dropped");
+    toast("You died — skills kept, gear dropped", "bad");
     saveGame(true);
   }
 
@@ -910,562 +567,743 @@
     if (safe) { sx = safe.x + safe.w / 2; sy = safe.y + safe.h / 2; }
     else if (camp) { sx = camp.x; sy = camp.y + 40; }
     else { sx = WORLD_W / 2; sy = WORLD_H / 2; }
-    const skills = state.player.skills;
-    const kills = state.player.kills;
-    const maxHp = state.player.maxHp;
+    const skills = state.player.skills, kills = state.player.kills, maxHp = state.player.maxHp;
     state.player = createPlayer(sx, sy, skills);
-    state.player.kills = kills;
-    state.player.maxHp = maxHp;
-    state.player.hp = Math.min(60, maxHp);
-    state.player.hunger = 55;
-    state.player.inv = [{ id: "berries", qty: 1 }];
-    toast(safe ? "Respawned at Safehouse" : "Back at the campfire. Recover your gear if you can.");
+    state.player.kills = kills; state.player.maxHp = maxHp;
+    state.player.hp = Math.min(60, maxHp); state.player.hunger = 55;
+    state.player.inv = [{ id: "berries", qty: 2 }];
+    toast(safe ? "Respawned at Safehouse" : "Back at the campfire", "sys");
     saveGame(true);
+  }
+
+  function moveToward(ent, tx, ty, speed, dt) {
+    const dx = tx - ent.x, dy = ty - ent.y;
+    const d = Math.hypot(dx, dy) || 1;
+    ent.facing = Math.atan2(dy, dx);
+    const step = Math.min(speed * dt, d);
+    ent.x = clamp(ent.x + (dx / d) * step, 20, WORLD_W - 20);
+    ent.y = clamp(ent.y + (dy / d) * step, 20, WORLD_H - 20);
+  }
+
+  function resolveSolid(ent) {
+    for (const prop of state.props) {
+      if (!prop.solid || prop.kind === "building") continue;
+      if (!prop.r) continue;
+      const d = dist(ent, prop);
+      const minD = ent.r + prop.r * 0.65;
+      if (d < minD && d > 0) {
+        const push = (minD - d) / d;
+        ent.x += (ent.x - prop.x) * push;
+        ent.y += (ent.y - prop.y) * push;
+      }
+    }
+  }
+
+  function moveSpeed(p) {
+    return MOVE_BASE * (1 + (p.skills.fitness.level - 1) * 0.04);
+  }
+
+
+  function update(dt) {
+    if (!state.running || state.paused || !state.player) return;
+    if (state.deathTimer > 0) {
+      state.deathTimer -= dt;
+      if (state.deathTimer <= 0) {
+        respawnPlayer();
+        document.getElementById("death-banner").classList.remove("show");
+      }
+      return;
+    }
+    state.time += dt;
+    state.dayTimer += dt;
+    if (state.dayTimer >= DAY_LEN) {
+      state.dayTimer -= DAY_LEN; state.day += 1;
+      toast("Day " + state.day + " begins…", "sys");
+      spawnNightZombies();
+    }
+    const p = state.player;
+    if (!p.alive) return;
+
+    p.hunger = Math.max(0, p.hunger - HUNGER_RATE * dt);
+    if (p.hunger <= 0) p.hp -= 2.2 * dt;
+    else if (p.hunger > 60 && p.hp < p.maxHp) p.hp = Math.min(p.maxHp, p.hp + 1.1 * dt);
+    const insideB = playerBuilding();
+    if (insideB && insideB.base && insideB.base.type === "safehouse" && insideB.base.wallHp > 0) {
+      p.hp = Math.min(p.maxHp, p.hp + 3.2 * dt);
+    }
+    p.attackCd = Math.max(0, p.attackCd - dt);
+    p.gatherCd = Math.max(0, p.gatherCd - dt);
+
+    // Projectiles
+    for (let i = state.projectiles.length - 1; i >= 0; i--) {
+      const pr = state.projectiles[i];
+      pr.life -= dt;
+      const t = 1 - Math.max(0, pr.life) / 0.35;
+      pr.x = pr.x + (pr.tx - pr.x) * Math.min(1, dt * 8);
+      pr.y = pr.y + (pr.ty - pr.y) * Math.min(1, dt * 8);
+      if (pr.life <= 0 || t >= 0.95) {
+        const c = state.creatures.find((cc) => cc.id === pr.targetId && cc.alive);
+        if (c) applyDamageToCreature(c, pr.dmg, p);
+        state.projectiles.splice(i, 1);
+      }
+    }
+
+    if (p.target) {
+      if (p.target.creatureId != null) {
+        const c = state.creatures.find((cc) => cc.id === p.target.creatureId && cc.alive);
+        if (!c) p.target = null;
+        else {
+          const bow = p.equip.weapon && ITEM_DEFS[p.equip.weapon] && ITEM_DEFS[p.equip.weapon].style === "ranged";
+          const range = bow ? (ITEM_DEFS[p.equip.weapon].range || 200) : ATTACK_RANGE;
+          if (dist(p, c) <= range) { /* stop */ tryAttack(p, c); }
+          else moveToward(p, c.x, c.y, moveSpeed(p), dt);
+        }
+      } else if (p.target.propId != null) {
+        const prop = state.props[p.target.propId];
+        if (!prop || (prop.hp != null && prop.hp <= 0 && !prop.infinite)) p.target = null;
+        else {
+          const px = propCenter(prop);
+          if (dist(p, px) <= GATHER_RANGE) tryGather(p, prop);
+          else moveToward(p, px.x, px.y, moveSpeed(p), dt);
+        }
+      } else if (p.target.lootId != null) {
+        const pile = state.lootPiles[p.target.lootId];
+        if (!pile) p.target = null;
+        else if (dist(p, pile) <= GATHER_RANGE) { pickupLoot(p, p.target.lootId); p.target = null; }
+        else moveToward(p, pile.x, pile.y, moveSpeed(p), dt);
+      } else if (p.target.cook) {
+        const fire = state.props.find((pr) => pr.kind === "campfire");
+        if (!fire) p.target = null;
+        else if (dist(p, fire) <= GATHER_RANGE) { tryCookAtFire(p); p.target = null; }
+        else moveToward(p, fire.x, fire.y, moveSpeed(p), dt);
+      } else {
+        const d = Math.hypot(p.target.x - p.x, p.target.y - p.y);
+        if (d < 4) { p.x = p.target.x; p.y = p.target.y; p.target = null; }
+        else moveToward(p, p.target.x, p.target.y, moveSpeed(p), dt);
+      }
+    }
+    resolveSolid(p);
+    updateCreatures(dt, p);
+
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const pt = state.particles[i]; pt.life -= dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 40 * dt;
+      if (pt.life <= 0) state.particles.splice(i, 1);
+    }
+    for (let i = state.floatTexts.length - 1; i >= 0; i--) {
+      const ft = state.floatTexts[i]; ft.life -= dt; ft.y -= 20 * dt;
+      if (ft.life <= 0) state.floatTexts.splice(i, 1);
+    }
+    for (let i = state.tapMarkers.length - 1; i >= 0; i--) {
+      state.tapMarkers[i].life -= dt;
+      if (state.tapMarkers[i].life <= 0) state.tapMarkers.splice(i, 1);
+    }
+    if (state.toastTimer > 0) {
+      state.toastTimer -= dt;
+      if (state.toastTimer <= 0) {
+        const el = document.getElementById("toast");
+        if (el) el.classList.remove("show");
+      }
+    }
+    if (Math.floor(state.time / 20) !== Math.floor((state.time - dt) / 20)) saveGame(true);
+    updateHud();
+  }
+
+  function updateCreatures(dt, p) {
+    for (const c of state.creatures) {
+      if (!c.alive) continue;
+      c.hitFlash = Math.max(0, c.hitFlash - dt);
+      c.attackCd = Math.max(0, c.attackCd - dt);
+      const d = dist(c, p);
+      const def = CREATURE_DEFS[c.type];
+
+      if (!c.aggressive && c.flee) {
+        if (d < (c.agro || 80)) {
+          const ang = Math.atan2(c.y - p.y, c.x - p.x);
+          moveToward(c, c.x + Math.cos(ang) * 40, c.y + Math.sin(ang) * 40, c.speed, dt);
+        } else wander(c, dt);
+        resolveSolid(c);
+        continue;
+      }
+
+      // Fort attack for zombies/goblins near player base
+      let fort = null, fortDist = 9999;
+      if (c.aggressive) {
+        for (const b of buildingsList()) {
+          if (!b.base || !b.base.claimed || b.base.wallHp <= 0) continue;
+          const center = buildingCenter(b);
+          if (dist(p, center) > 220) continue;
+          const fd = dist(c, center);
+          if (fd < fortDist) { fortDist = fd; fort = b; }
+        }
+      }
+      if (fort && fortDist < AGRO_BASE + 40 && d > 70) {
+        const door = { x: fort.x + fort.w / 2, y: fort.y + fort.h + 4 };
+        if (dist(c, door) > 18) moveToward(c, door.x, door.y, c.speed, dt);
+        else if (c.attackCd <= 0) {
+          c.attackCd = 1.0;
+          const dmg = 3 + Math.floor(Math.random() * 4);
+          fort.base.wallHp = Math.max(0, fort.base.wallHp - dmg);
+          floatText(door.x, door.y - 10, "-" + dmg, "#e0b45a");
+          if (fort.base.wallHp <= 0) toast("Barricade broken!", "bad");
+        }
+      } else if (c.aggressive && d < (c.agro || AGRO_BASE)) {
+        moveToward(c, p.x, p.y, c.speed, dt);
+        if (d < c.r + p.r + 4 && c.attackCd <= 0) {
+          const ib = playerBuilding();
+          if (ib && ib.base && ib.base.claimed && ib.base.wallHp > 0) {
+            c.attackCd = 1.1;
+            const dmg = 2 + Math.floor(Math.random() * 3);
+            ib.base.wallHp = Math.max(0, ib.base.wallHp - dmg);
+            floatText(ib.x + ib.w / 2, ib.y, "wall -" + dmg, "#e0b45a");
+          } else {
+            c.attackCd = 1.05;
+            const raw = def.dmg[0] + Math.floor(Math.random() * (def.dmg[1] - def.dmg[0] + 1));
+            const dmg = reduceDamage(raw, armorTotal(p.equip));
+            p.hp -= dmg;
+            floatText(p.x, p.y - 20, "-" + dmg, "#e05a5a");
+            burst(p.x, p.y, "#e05a5a", 5);
+            if (p.hp <= 0) { playerDie(); break; }
+          }
+        }
+      } else wander(c, dt);
+      resolveSolid(c);
+    }
+  }
+
+  function wander(c, dt) {
+    c.wanderT -= dt;
+    if (c.wanderT <= 0) {
+      c.wanderT = 2 + Math.random() * 3;
+      c.wx = clamp(c.x + (Math.random() - 0.5) * 120, 40, WORLD_W - 40);
+      c.wy = clamp(c.y + (Math.random() - 0.5) * 120, 40, WORLD_H - 40);
+    }
+    moveToward(c, c.wx, c.wy, c.speed * 0.35, dt);
   }
 
   function spawnNightZombies() {
     const camp = state.props.find((pr) => pr.kind === "campfire");
-    const cx = camp ? camp.x : WORLD_W / 2;
-    const cy = camp ? camp.y : WORLD_H / 2;
-    const alive = state.zombies.filter((z) => z.alive).length;
-    const add = Math.min(6, Math.max(0, 35 - alive));
+    const cx = camp ? camp.x : WORLD_W / 2, cy = camp ? camp.y : WORLD_H / 2;
+    const alive = state.creatures.filter((c) => c.alive && c.type === "zombie").length;
+    const add = Math.min(5, Math.max(0, 28 - alive));
     for (let i = 0; i < add; i++) {
-      const ang = Math.random() * Math.PI * 2;
-      const rad = 350 + Math.random() * 500;
-      const x = clamp(cx + Math.cos(ang) * rad, 60, WORLD_W - 60);
-      const y = clamp(cy + Math.sin(ang) * rad, 60, WORLD_H - 60);
-      state.zombies.push(makeZombie(x, y));
+      const ang = Math.random() * Math.PI * 2, rad = 380 + Math.random() * 480;
+      state.creatures.push(makeCreature("zombie",
+        clamp(cx + Math.cos(ang) * rad, 60, WORLD_W - 60),
+        clamp(cy + Math.sin(ang) * rad, 60, WORLD_H - 60)));
     }
-    if (add) toast(`${add} more dead stir in the dark…`);
+    if (add) toast(add + " more dead stir…", "bad");
   }
 
-  function burst(x, y, color, n) {
-    for (let i = 0; i < n; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const sp = 30 + Math.random() * 60;
-      state.particles.push({
-        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-        life: 0.3 + Math.random() * 0.4, color, r: 2 + Math.random() * 2,
-      });
-    }
-  }
 
-  function floatText(x, y, text, color) {
-    state.floatTexts.push({ x, y, text, color, life: 0.9 });
-  }
-
-  function toast(msg) {
-    state.toastMsg = msg;
-    state.toastTimer = 2.2;
-    const el = document.getElementById("toast");
-    el.textContent = msg;
-    el.classList.add("show");
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // INPUT
-  // ═══════════════════════════════════════════════════════════
+  // ── Input ──
   const canvas = document.getElementById("game");
   const minimap = document.getElementById("minimap");
   const ctx = canvas.getContext("2d");
   const mctx = minimap.getContext("2d");
-
-  /**
-   * Screen→world in CSS/logical pixels (matches ctx.setTransform(dpr) draw space).
-   * Do NOT multiply by canvas.width/height (backing store) — that double-applies DPR.
-   */
-  function clientToWorld(clientX, clientY, rect, cam, viewW, viewH) {
-    const rw = rect.width || 1;
-    const rh = rect.height || 1;
-    const vw = viewW || rw;
-    const vh = viewH || rh;
-    return {
-      x: ((clientX - rect.left) / rw) * vw + cam.x,
-      y: ((clientY - rect.top) / rh) * vh + cam.y,
-    };
-  }
 
   function canvasToWorld(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     return clientToWorld(clientX, clientY, rect, state.cam, state.viewW, state.viewH);
   }
 
-  function onTap(clientX, clientY) {
-    if (!state.running || state.paused || state.deathTimer > 0) return;
-    const p = state.player;
-    if (!p || !p.alive) return;
-    const w = canvasToWorld(clientX, clientY);
-
-    // Tap marker so player sees registered world point
-    state.tapMarkers.push({ x: w.x, y: w.y, life: 0.55 });
-
-    // Zombie first — generous hit pad for fat-finger taps
-    let bestZ = null, bestZd = 40;
-    for (const z of state.zombies) {
-      if (!z.alive) continue;
-      const d = Math.hypot(z.x - w.x, z.y - w.y);
-      if (d < z.r + 28 && d < bestZd) { bestZ = z; bestZd = d; }
+  function hitTestWorld(w) {
+    let bestC = null, bestCd = 40;
+    for (const c of state.creatures) {
+      if (!c.alive) continue;
+      const d = Math.hypot(c.x - w.x, c.y - w.y);
+      if (d < c.r + 28 && d < bestCd) { bestC = c; bestCd = d; }
     }
-    if (bestZ) {
-      p.target = { zombieId: bestZ.id };
-      return;
-    }
-
-    // Loot piles
+    let lootIdx = -1;
     for (let i = 0; i < state.lootPiles.length; i++) {
-      const pile = state.lootPiles[i];
-      if (Math.hypot(pile.x - w.x, pile.y - w.y) < 28) {
-        p.target = { lootId: i };
-        return;
-      }
+      if (Math.hypot(state.lootPiles[i].x - w.x, state.lootPiles[i].y - w.y) < 28) { lootIdx = i; break; }
     }
-
-    // Gatherables
     let bestP = -1, bestPd = 46;
     for (let i = 0; i < state.props.length; i++) {
       const prop = state.props[i];
-      if (prop.kind === "building" || prop.kind === "campfire") continue;
-      if (prop.hp != null && prop.hp <= 0) continue;
+      if (prop.kind === "building" || prop.kind === "pond") continue;
       if (prop.gathered) continue;
-      const c = propCenter(prop);
-      const d = Math.hypot(c.x - w.x, c.y - w.y);
-      const hitR = prop.r ? prop.r + 22 : 28;
+      if (prop.hp != null && prop.hp <= 0 && !prop.infinite) continue;
+      const pc = propCenter(prop);
+      const d = Math.hypot(pc.x - w.x, pc.y - w.y);
+      const hitR = (prop.r || 14) + 22;
       if (d < hitR && d < bestPd) { bestP = i; bestPd = d; }
     }
-    if (bestP >= 0) {
-      p.target = { propId: bestP };
-      return;
-    }
+    return { creature: bestC, lootIdx, propId: bestP, world: w };
+  }
 
-    // Move
+  function defaultTap(hit) {
+    const p = state.player;
+    state.tapMarkers.push({ x: hit.world.x, y: hit.world.y, life: 0.55 });
+    if (hit.creature) { p.target = { creatureId: hit.creature.id }; return; }
+    if (hit.lootIdx >= 0) { p.target = { lootId: hit.lootIdx }; return; }
+    if (hit.propId >= 0) { p.target = { propId: hit.propId }; return; }
     p.target = {
-      x: clamp(w.x, 20, WORLD_W - 20),
-      y: clamp(w.y, 20, WORLD_H - 20),
+      x: clamp(hit.world.x, 20, WORLD_W - 20),
+      y: clamp(hit.world.y, 20, WORLD_H - 20),
     };
+  }
+
+  function buildContextActions(hit) {
+    const actions = [];
+    if (hit.creature) {
+      const def = CREATURE_DEFS[hit.creature.type];
+      actions.push({ id: "attack", label: "Attack " + def.name });
+      actions.push({ id: "examine", label: "Examine " + def.name });
+    }
+    if (hit.lootIdx >= 0) {
+      actions.push({ id: "pickup", label: "Pick up loot" });
+      actions.push({ id: "examine_loot", label: "Examine loot" });
+    }
+    if (hit.propId >= 0) {
+      const prop = state.props[hit.propId];
+      const nd = NODE_DEFS[prop.node || prop.kind];
+      if (prop.kind === "crate") actions.push({ id: "loot_crate", label: "Loot crate" });
+      else if (prop.kind === "campfire") {
+        actions.push({ id: "cook", label: "Cook food" });
+        actions.push({ id: "examine_fire", label: "Examine campfire" });
+      } else if (prop.kind === "forge") {
+        actions.push({ id: "smith", label: "Use forge (Smith)" });
+        actions.push({ id: "examine_forge", label: "Examine forge" });
+      } else if (nd) {
+        actions.push({ id: "gather", label: (nd.verb || "Gather") + " " + nd.label });
+        actions.push({ id: "examine_node", label: "Examine " + nd.label });
+      }
+    }
+    // building under cursor?
+    const b = buildingAt(hit.world.x, hit.world.y);
+    if (b) {
+      actions.push({ id: "examine_building", label: "Examine building" });
+      if (pointInBuilding(state.player.x, state.player.y, b) && b.base && !b.base.claimed) {
+        actions.push({ id: "claim", label: "Claim building" });
+      }
+    }
+    actions.push({ id: "walk", label: "Walk here" });
+    return actions;
+  }
+
+  function runContextAction(actionId, hit) {
+    const p = state.player;
+    hideContextMenu();
+    if (actionId === "attack" && hit.creature) p.target = { creatureId: hit.creature.id };
+    else if (actionId === "pickup" && hit.lootIdx >= 0) p.target = { lootId: hit.lootIdx };
+    else if ((actionId === "gather" || actionId === "loot_crate") && hit.propId >= 0) p.target = { propId: hit.propId };
+    else if (actionId === "cook") p.target = { cook: true };
+    else if (actionId === "smith") openWorkshop("smith");
+    else if (actionId === "claim") {
+      const b = buildingAt(hit.world.x, hit.world.y);
+      if (b) { claimBuilding(b); renderWorkshop(); }
+    } else if (actionId === "walk") {
+      p.target = { x: clamp(hit.world.x, 20, WORLD_W - 20), y: clamp(hit.world.y, 20, WORLD_H - 20) };
+    } else if (actionId.startsWith("examine")) {
+      examineHit(hit, actionId);
+    }
+  }
+
+  function examineHit(hit, actionId) {
+    if (hit.creature) {
+      const d = CREATURE_DEFS[hit.creature.type];
+      toast(d.name + " — " + (d.aggressive ? "aggressive" : "skittish") + ", HP " + hit.creature.hp, "sys");
+    } else if (hit.lootIdx >= 0) {
+      const pile = state.lootPiles[hit.lootIdx];
+      toast("Loot: " + pile.items.map((i) => ITEM_DEFS[i.id].name + "×" + i.qty).join(", "), "sys");
+    } else if (hit.propId >= 0) {
+      const prop = state.props[hit.propId];
+      const nd = NODE_DEFS[prop.node || prop.kind];
+      if (nd) toast(nd.label + (nd.tool ? " (needs " + nd.tool + " t" + nd.tier + "+)" : ""), "sys");
+      else toast(prop.kind, "sys");
+    } else {
+      const b = buildingAt(hit.world.x, hit.world.y);
+      if (b && b.base) {
+        const t = BUILDING_TYPES[b.base.type] || BUILDING_TYPES.none;
+        toast((b.base.claimed ? t.name : "Unclaimed building") + " — fort " + b.base.wallHp + "/" + b.base.wallMax, "sys");
+      } else toast("Nothing interesting.", "sys");
+    }
+  }
+
+  function showContextMenu(clientX, clientY, hit) {
+    const actions = buildContextActions(hit);
+    state.contextMenu = { hit, actions };
+    const menu = document.getElementById("context-menu");
+    const list = document.getElementById("context-list");
+    list.innerHTML = actions.map((a, i) =>
+      `<button type="button" class="ctx-item" data-act="${a.id}">${a.label}</button>`).join("");
+    menu.classList.add("open");
+    // position within viewport
+    const pad = 8;
+    let left = clientX, top = clientY;
+    menu.style.left = "0px"; menu.style.top = "0px";
+    menu.style.visibility = "hidden"; menu.style.display = "block";
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    left = Math.min(window.innerWidth - mw - pad, Math.max(pad, left));
+    top = Math.min(window.innerHeight - mh - pad, Math.max(pad, top));
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    menu.style.visibility = "visible";
+    state.paused = true;
+    list.querySelectorAll(".ctx-item").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        runContextAction(btn.dataset.act, hit);
+      });
+    });
+  }
+  function hideContextMenu() {
+    state.contextMenu = null;
+    const menu = document.getElementById("context-menu");
+    if (menu) { menu.classList.remove("open"); menu.style.display = "none"; }
+    if (!document.querySelector(".overlay.open")) state.paused = false;
+  }
+
+  let pressTimer = null, pressOrigin = null, pressHit = null, moved = false;
+
+  function clearPress() {
+    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    pressOrigin = null; pressHit = null; moved = false;
   }
 
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    if (e.pointerType === "mouse" && e.button === 2) {
+      // right-click context
+      if (!state.running || state.deathTimer > 0) return;
+      const w = canvasToWorld(e.clientX, e.clientY);
+      const hit = hitTestWorld(w);
+      showContextMenu(e.clientX, e.clientY, hit);
+      return;
+    }
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-    onTap(e.clientX, e.clientY);
+    if (!state.running || state.paused || state.deathTimer > 0) return;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    const w = canvasToWorld(e.clientX, e.clientY);
+    pressOrigin = { x: e.clientX, y: e.clientY };
+    pressHit = hitTestWorld(w);
+    moved = false;
+    pressTimer = setTimeout(() => {
+      if (!moved && pressHit) showContextMenu(e.clientX, e.clientY, pressHit);
+      clearPress();
+    }, 450);
   }, { passive: false });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!pressOrigin) return;
+    if (Math.hypot(e.clientX - pressOrigin.x, e.clientY - pressOrigin.y) > 14) {
+      moved = true;
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    }
+  });
+
+  canvas.addEventListener("pointerup", (e) => {
+    if (e.pointerType === "mouse" && e.button === 2) return;
+    if (!pressOrigin) return;
+    const wasLong = !pressTimer; // timer already fired
+    const hit = pressHit;
+    const didMove = moved;
+    clearPress();
+    if (wasLong || didMove) return;
+    if (!state.running || state.paused || state.deathTimer > 0) return;
+    if (state.contextMenu) { hideContextMenu(); return; }
+    defaultTap(hit);
+  });
+
+  canvas.addEventListener("pointercancel", () => clearPress());
+  canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); }, { passive: false });
   canvas.addEventListener("touchstart", (e) => { e.preventDefault(); }, { passive: false });
   canvas.addEventListener("gesturestart", (e) => { e.preventDefault(); }, { passive: false });
 
-  // ═══════════════════════════════════════════════════════════
-  // RENDER
-  // ═══════════════════════════════════════════════════════════
+
+  // ── Render ──
   function resize() {
     const wrap = document.getElementById("canvas-wrap");
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-    const w = Math.max(1, wrap.clientWidth);
-    const h = Math.max(1, wrap.clientHeight);
-    state.viewW = w;
-    state.viewH = h;
-    canvas.width = Math.floor(w * dpr);
-    canvas.height = Math.floor(h * dpr);
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
+    const w = Math.max(1, wrap.clientWidth), h = Math.max(1, wrap.clientHeight);
+    state.viewW = w; state.viewH = h;
+    canvas.width = Math.floor(w * dpr); canvas.height = Math.floor(h * dpr);
+    canvas.style.width = w + "px"; canvas.style.height = h + "px";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
-
   function dayFactor() {
-    // 0 night-ish, 1 day — based on dayTimer
     const t = state.dayTimer / DAY_LEN;
-    // dawn 0-0.15, day 0.15-0.55, dusk 0.55-0.7, night 0.7-1
     if (t < 0.15) return 0.45 + (t / 0.15) * 0.55;
     if (t < 0.55) return 1;
     if (t < 0.7) return 1 - ((t - 0.55) / 0.15) * 0.55;
     return 0.4;
   }
-
   function timeLabel() {
     const t = state.dayTimer / DAY_LEN;
-    if (t < 0.15) return "Dawn";
-    if (t < 0.55) return "Day";
-    if (t < 0.7) return "Dusk";
-    return "Night";
+    if (t < 0.15) return "Dawn"; if (t < 0.55) return "Day"; if (t < 0.7) return "Dusk"; return "Night";
   }
 
   function render() {
-    const vw = state.viewW;
-    const vh = state.viewH;
-    if (!state.player) {
-      ctx.fillStyle = "#3a5a28";
-      ctx.fillRect(0, 0, vw, vh);
-      return;
-    }
-
+    const vw = state.viewW, vh = state.viewH;
+    if (!state.player) { ctx.fillStyle = "#3a5a28"; ctx.fillRect(0, 0, vw, vh); return; }
     const p = state.player;
     state.cam.x = clamp(p.x - vw / 2, 0, Math.max(0, WORLD_W - vw));
     state.cam.y = clamp(p.y - vh / 2, 0, Math.max(0, WORLD_H - vh));
-    const cam = state.cam;
-    const light = dayFactor();
+    const cam = state.cam, light = dayFactor();
 
-    // Chunky grass/dirt/stone tiles (RSC-inspired original)
-    const t0x = Math.floor(cam.x / TILE) - 1;
-    const t0y = Math.floor(cam.y / TILE) - 1;
-    const t1x = Math.ceil((cam.x + vw) / TILE) + 1;
-    const t1y = Math.ceil((cam.y + vh) / TILE) + 1;
+    const t0x = Math.floor(cam.x / TILE) - 1, t0y = Math.floor(cam.y / TILE) - 1;
+    const t1x = Math.ceil((cam.x + vw) / TILE) + 1, t1y = Math.ceil((cam.y + vh) / TILE) + 1;
     for (let ty = t0y; ty <= t1y; ty++) {
       for (let tx = t0x; tx <= t1x; tx++) {
-        const h = ((tx * 73856093) ^ (ty * 19349663) ^ state.seed) >>> 0;
-        const kind = h % 7;
+        const hsh = ((tx * 73856093) ^ (ty * 19349663) ^ state.seed) >>> 0;
+        const kind = hsh % 7;
         let r, g, b;
-        if (kind < 4) { r = 40 + (h % 20); g = (90 + light * 40 + (h % 25)) | 0; b = 35; }
-        else if (kind < 6) { r = 90 + (h % 20); g = 70 + (h % 15); b = 40; }
+        if (kind < 4) { r = 40 + (hsh % 20); g = (90 + light * 40 + (hsh % 25)) | 0; b = 35; }
+        else if (kind < 6) { r = 90 + (hsh % 20); g = 70 + (hsh % 15); b = 40; }
         else { r = 110; g = 105; b = 85; }
         ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
         ctx.fillRect(tx * TILE - cam.x, ty * TILE - cam.y, TILE, TILE);
-        ctx.strokeStyle = "rgba(0,0,0,0.08)";
-        ctx.strokeRect(tx * TILE - cam.x + 0.5, ty * TILE - cam.y + 0.5, TILE - 1, TILE - 1);
       }
     }
 
-    // Props
-    for (const prop of state.props) {
-      drawProp(prop, cam, light);
-    }
-
-    // Loot piles
+    for (const prop of state.props) drawProp(prop, cam, light, vw, vh);
     for (const pile of state.lootPiles) {
       const sx = pile.x - cam.x, sy = pile.y - cam.y;
       if (sx < -20 || sy < -20 || sx > vw + 20 || sy > vh + 20) continue;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 10, 0, Math.PI * 2);
-      ctx.fillStyle = pile.deathDrop ? "#c9a227" : "#8a7a4a";
-      ctx.fill();
-      ctx.strokeStyle = "#e8d080";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = "#1a1810";
-      ctx.font = "bold 10px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("Loot", sx, sy + 3);
+      ctx.fillStyle = pile.deathDrop ? "#e8c860" : "#c9a05a";
+      ctx.fillRect(sx - 9, sy - 7, 18, 14);
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.strokeRect(sx - 9, sy - 7, 18, 14);
     }
-
-    // Zombies
-    for (const z of state.zombies) {
-      if (!z.alive) continue;
-      const sx = z.x - cam.x, sy = z.y - cam.y;
+    for (const c of state.creatures) {
+      if (!c.alive) continue;
+      const sx = c.x - cam.x, sy = c.y - cam.y;
       if (sx < -30 || sy < -30 || sx > vw + 30 || sy > vh + 30) continue;
-      drawZombie(sx, sy, z);
+      drawCreature(sx, sy, c);
     }
-
-    // Player
-    if (p.alive || state.deathTimer > 0) {
-      drawPlayer(p.x - cam.x, p.y - cam.y, p);
+    for (const pr of state.projectiles) {
+      ctx.fillStyle = pr.color;
+      ctx.beginPath(); ctx.arc(pr.x - cam.x, pr.y - cam.y, 3, 0, Math.PI * 2); ctx.fill();
     }
+    if (p.alive || state.deathTimer > 0) drawPlayer(p.x - cam.x, p.y - cam.y, p);
 
-    // Move target marker
-    if (p.target && p.target.x != null && p.target.zombieId == null && p.target.propId == null && p.target.lootId == null) {
-      ctx.beginPath();
-      ctx.arc(p.target.x - cam.x, p.target.y - cam.y, 8, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(126,207,138,0.7)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-
-    // Attack range ring when near zombie target
-    if (p.target && p.target.zombieId != null) {
-      ctx.beginPath();
-      ctx.arc(p.x - cam.x, p.y - cam.y, ATTACK_RANGE, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(224,90,90,0.35)";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
-
-    // Tap registration markers
     for (const tm of state.tapMarkers) {
       const a = Math.max(0, tm.life / 0.55);
-      ctx.beginPath();
-      ctx.arc(tm.x - cam.x, tm.y - cam.y, 10 + (1 - a) * 8, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(232,200,96,${a})`;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(tm.x - cam.x, tm.y - cam.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(232,200,96,${a})`;
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(tm.x - cam.x, tm.y - cam.y, 10 + (1 - a) * 8, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(232,200,96,${a})`; ctx.lineWidth = 2; ctx.stroke();
     }
-
-    // Particles
+    if (p.target && p.target.x != null && !p.target.creatureId && p.target.propId == null && p.target.lootId == null && !p.target.cook) {
+      ctx.beginPath(); ctx.arc(p.target.x - cam.x, p.target.y - cam.y, 7, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(232,200,96,0.75)"; ctx.lineWidth = 2; ctx.stroke();
+    }
     for (const pt of state.particles) {
       ctx.globalAlpha = Math.max(0, pt.life * 2);
       ctx.fillStyle = pt.color;
-      ctx.beginPath();
-      ctx.arc(pt.x - cam.x, pt.y - cam.y, pt.r, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(pt.x - cam.x - pt.r, pt.y - cam.y - pt.r, pt.r * 2, pt.r * 2);
       ctx.globalAlpha = 1;
     }
-
-    // Float texts
-    ctx.textAlign = "center";
-    ctx.font = "bold 12px sans-serif";
+    ctx.textAlign = "center"; ctx.font = "bold 12px Georgia";
     for (const ft of state.floatTexts) {
       ctx.globalAlpha = Math.min(1, ft.life * 2);
-      ctx.fillStyle = ft.color;
-      ctx.fillText(ft.text, ft.x - cam.x, ft.y - cam.y);
+      ctx.fillStyle = ft.color; ctx.fillText(ft.text, ft.x - cam.x, ft.y - cam.y);
       ctx.globalAlpha = 1;
     }
-
-    // Night vignette
     if (light < 0.85) {
-      const g = ctx.createRadialGradient(vw / 2, vh / 2, vw * 0.2, vw / 2, vh / 2, vw * 0.75);
-      const a = (1 - light) * 0.55;
+      const g = ctx.createRadialGradient(vw/2, vh/2, vw*0.2, vw/2, vh/2, vw*0.75);
       g.addColorStop(0, "rgba(0,0,0,0)");
-      g.addColorStop(1, `rgba(0,0,0,${a})`);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, vw, vh);
+      g.addColorStop(1, `rgba(10,6,2,${(1-light)*0.55})`);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, vw, vh);
     }
-
     drawMinimap();
   }
 
-  function drawProp(prop, cam, light) {
-    const wrap = document.getElementById("canvas-wrap");
-    const vw = wrap.clientWidth, vh = wrap.clientHeight;
-
+  function drawProp(prop, cam, light, vw, vh) {
     if (prop.kind === "building") {
       const sx = prop.x - cam.x, sy = prop.y - cam.y;
       if (sx + prop.w < -40 || sy + prop.h < -40 || sx > vw + 40 || sy > vh + 40) return;
-      // stone floor
-      ctx.fillStyle = "#6a6050";
+      ctx.fillStyle = prop.goblinHut ? "#4a5a38" : "#6a6050";
       ctx.fillRect(sx, sy, prop.w, prop.h);
-      // timber frame walls
       ctx.fillStyle = "#5a4030";
-      ctx.fillRect(sx, sy, prop.w, 10);
-      ctx.fillRect(sx, sy + prop.h - 10, prop.w, 10);
-      ctx.fillRect(sx, sy, 10, prop.h);
-      ctx.fillRect(sx + prop.w - 10, sy, 10, prop.h);
-      ctx.strokeStyle = "#3a2a18";
-      ctx.lineWidth = 1;
-      for (let yy = 12; yy < prop.h - 12; yy += 10) {
-        for (let xx = 12; xx < prop.w - 12; xx += 16) ctx.strokeRect(sx + xx, sy + yy, 14, 8);
-      }
-      // red roof
-      ctx.fillStyle = "#7a3030";
-      ctx.beginPath();
-      ctx.moveTo(sx - 4, sy + 4);
-      ctx.lineTo(sx + prop.w / 2, sy - 22);
-      ctx.lineTo(sx + prop.w + 4, sy + 4);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = "#1a1208";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // door
-      ctx.fillStyle = "#4a3a28";
-      ctx.fillRect(sx + prop.w / 2 - 12, sy + prop.h - 10, 24, 10);
-      const winColor = (prop.base && prop.base.boarded) ? "#5a4028" : "#80a0c0";
-      ctx.fillStyle = winColor;
-      ctx.fillRect(sx + 18, sy + 28, 16, 14);
-      ctx.fillRect(sx + prop.w - 34, sy + 28, 16, 14);
-      ctx.strokeStyle = "#1a1208";
-      ctx.strokeRect(sx + 18, sy + 28, 16, 14);
-      ctx.strokeRect(sx + prop.w - 34, sy + 28, 16, 14);
-      if (prop.base && prop.base.boarded) {
-        ctx.beginPath();
-        ctx.moveTo(sx + 18, sy + 28); ctx.lineTo(sx + 34, sy + 42);
-        ctx.moveTo(sx + 34, sy + 28); ctx.lineTo(sx + 18, sy + 42);
-        ctx.stroke();
-      }
-      ctx.strokeStyle = "#1a1208";
-      ctx.lineWidth = 3;
-      ctx.strokeRect(sx, sy, prop.w, prop.h);
+      ctx.fillRect(sx, sy, prop.w, 10); ctx.fillRect(sx, sy + prop.h - 10, prop.w, 10);
+      ctx.fillRect(sx, sy, 10, prop.h); ctx.fillRect(sx + prop.w - 10, sy, 10, prop.h);
+      ctx.fillStyle = prop.goblinHut ? "#3a6a30" : "#7a3030";
+      ctx.beginPath(); ctx.moveTo(sx - 4, sy + 4); ctx.lineTo(sx + prop.w/2, sy - 20); ctx.lineTo(sx + prop.w + 4, sy + 4); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 3; ctx.strokeRect(sx, sy, prop.w, prop.h);
+      const win = (prop.base && prop.base.boarded) ? "#5a4028" : "#80a0c0";
+      ctx.fillStyle = win; ctx.fillRect(sx + 16, sy + 26, 14, 12); ctx.fillRect(sx + prop.w - 30, sy + 26, 14, 12);
       if (prop.base && prop.base.claimed) {
         const label = (BUILDING_TYPES[prop.base.type] && BUILDING_TYPES[prop.base.type].name) || "Claimed";
-        ctx.fillStyle = "#e8c860";
-        ctx.font = "bold 11px Georgia";
-        ctx.textAlign = "center";
-        ctx.fillText(label, sx + prop.w / 2, sy - 28);
+        ctx.fillStyle = "#e8c860"; ctx.font = "bold 11px Georgia"; ctx.textAlign = "center";
+        ctx.fillText(label, sx + prop.w/2, sy - 26);
         if (prop.base.wallMax > 0) {
-          ctx.fillStyle = "#1a1208";
-          ctx.fillRect(sx + 10, sy + prop.h + 4, prop.w - 20, 5);
-          ctx.fillStyle = "#6aaa40";
-          ctx.fillRect(sx + 10, sy + prop.h + 4, (prop.w - 20) * (prop.base.wallHp / prop.base.wallMax), 5);
+          ctx.fillStyle = "#1a1208"; ctx.fillRect(sx + 10, sy + prop.h + 4, prop.w - 20, 5);
+          ctx.fillStyle = "#6aaa40"; ctx.fillRect(sx + 10, sy + prop.h + 4, (prop.w - 20) * (prop.base.wallHp / prop.base.wallMax), 5);
         }
       }
       return;
     }
-
     const sx = prop.x - cam.x, sy = prop.y - cam.y;
-    if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) return;
-
+    if (sx < -50 || sy < -50 || sx > vw + 50 || sy > vh + 50) return;
+    if (prop.kind === "pond") {
+      ctx.fillStyle = "#2a5a7a"; ctx.fillRect(sx, sy, prop.w, prop.h);
+      ctx.strokeStyle = "#1a1208"; ctx.strokeRect(sx, sy, prop.w, prop.h);
+      return;
+    }
     if (prop.kind === "campfire") {
-      ctx.beginPath();
-      ctx.arc(sx, sy, 18, 0, Math.PI * 2);
-      ctx.fillStyle = "#3a3228";
-      ctx.fill();
-      const flicker = 10 + Math.sin(state.time * 8) * 3;
-      const fg = ctx.createRadialGradient(sx, sy, 2, sx, sy, flicker);
-      fg.addColorStop(0, "rgba(255,200,80,0.95)");
-      fg.addColorStop(0.5, "rgba(255,100,40,0.55)");
-      fg.addColorStop(1, "rgba(255,60,0,0)");
-      ctx.fillStyle = fg;
-      ctx.beginPath();
-      ctx.arc(sx, sy - 4, flicker, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#c9a06a";
-      ctx.font = "9px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("CAMP", sx, sy + 28);
+      ctx.fillStyle = "#3a2a18"; ctx.beginPath(); ctx.arc(sx, sy, 16, 0, Math.PI*2); ctx.fill();
+      const flick = 9 + Math.sin(state.time * 9) * 2;
+      ctx.fillStyle = "#e8a020"; ctx.beginPath(); ctx.arc(sx, sy - 4, flick, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#e8c860"; ctx.font = "bold 9px Georgia"; ctx.textAlign = "center"; ctx.fillText("CAMP", sx, sy + 26);
       return;
     }
-
-    if (prop.kind === "tree") {
-      if (prop.hp <= 0) {
-        ctx.fillStyle = "#4a3a28";
-        ctx.fillRect(sx - 4, sy - 4, 8, 10);
-        return;
+    if (prop.kind === "forge") {
+      ctx.fillStyle = "#4a3a30"; ctx.fillRect(sx - 14, sy - 10, 28, 22);
+      ctx.fillStyle = "#c04020"; ctx.fillRect(sx - 8, sy - 4, 16, 10);
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.strokeRect(sx - 14, sy - 10, 28, 22);
+      ctx.fillStyle = "#e8c860"; ctx.font = "bold 9px Georgia"; ctx.textAlign = "center"; ctx.fillText("FORGE", sx, sy + 24);
+      return;
+    }
+    if (prop.gathered || (prop.hp != null && prop.hp <= 0 && !prop.infinite)) {
+      if (prop.kind === "tree" || prop.kind === "oak") {
+        ctx.fillStyle = "#5a4030"; ctx.fillRect(sx - 5, sy - 2, 10, 12);
       }
-      ctx.fillStyle = "#5a4030";
-      ctx.fillRect(sx - 4, sy - 2, 8, 16);
-      ctx.beginPath();
-      ctx.arc(sx, sy - 14, 16, 0, Math.PI * 2);
-      ctx.fillStyle = `rgb(${30 + light * 20 | 0},${90 + light * 40 | 0},${45})`;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(sx - 8, sy - 8, 10, 0, Math.PI * 2);
-      ctx.arc(sx + 8, sy - 10, 11, 0, Math.PI * 2);
-      ctx.fill();
       return;
     }
-
+    if (prop.kind === "tree" || prop.kind === "oak") {
+      ctx.fillStyle = "#5a3820"; ctx.fillRect(sx - 5, sy - 2, 10, 18);
+      ctx.fillStyle = prop.kind === "oak" ? "#2a6a30" : `rgb(30,${(100+light*30)|0},40)`;
+      ctx.beginPath(); ctx.arc(sx, sy - 16, prop.kind === "oak" ? 17 : 14, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.stroke();
+      return;
+    }
     if (prop.kind === "bush") {
-      if (prop.hp <= 0) return;
-      ctx.beginPath();
-      ctx.ellipse(sx, sy, 14, 10, 0, 0, Math.PI * 2);
-      ctx.fillStyle = `rgb(${40},${100 + light * 30 | 0},${55})`;
-      ctx.fill();
-      ctx.fillStyle = "#c060a0";
-      ctx.beginPath();
-      ctx.arc(sx - 4, sy - 2, 2.5, 0, Math.PI * 2);
-      ctx.arc(sx + 5, sy + 1, 2, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillStyle = `rgb(35,${(110+light*25)|0},45)`;
+      ctx.beginPath(); ctx.ellipse(sx, sy, 14, 10, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#c04080"; ctx.fillRect(sx - 4, sy - 2, 4, 4);
       return;
     }
-
     if (prop.kind === "crate") {
-      if (prop.hp <= 0) return;
-      ctx.fillStyle = "#8a6a38";
-      ctx.fillRect(sx - 11, sy - 9, 22, 18);
-      ctx.strokeStyle = "#5a4020";
-      ctx.strokeRect(sx - 11, sy - 9, 22, 18);
-      ctx.beginPath();
-      ctx.moveTo(sx - 11, sy);
-      ctx.lineTo(sx + 11, sy);
-      ctx.stroke();
+      ctx.fillStyle = "#8a6a30"; ctx.fillRect(sx - 12, sy - 10, 24, 20);
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.strokeRect(sx - 12, sy - 10, 24, 20);
       return;
     }
-
-    if (prop.kind === "scrapheap") {
-      if (prop.hp <= 0) return;
-      ctx.fillStyle = "#6a7078";
-      ctx.beginPath();
-      ctx.moveTo(sx - 12, sy + 6);
-      ctx.lineTo(sx - 4, sy - 8);
-      ctx.lineTo(sx + 10, sy - 4);
-      ctx.lineTo(sx + 12, sy + 8);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = "#9aa0a8";
-      ctx.fillRect(sx - 2, sy - 2, 8, 5);
+    if (prop.kind === "fish_spot") {
+      ctx.fillStyle = "rgba(60,120,180,0.55)";
+      ctx.beginPath(); ctx.ellipse(sx, sy, 18, 10, 0, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = "#e8c860"; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+      return;
     }
+    // rocks
+    const rockColor = prop.kind === "copper_rock" ? "#b08d57" : prop.kind === "tin_rock" ? "#a0a8b0" : prop.kind === "iron_rock" ? "#6a7078" : "#7a8088";
+    ctx.fillStyle = rockColor;
+    ctx.beginPath(); ctx.moveTo(sx - 12, sy + 6); ctx.lineTo(sx - 4, sy - 10); ctx.lineTo(sx + 12, sy - 4); ctx.lineTo(sx + 10, sy + 8); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.stroke();
   }
 
   function drawPlayer(sx, sy, p) {
     ctx.fillStyle = "rgba(0,0,0,0.3)";
-    ctx.beginPath(); ctx.ellipse(sx, sy + 11, 11, 4, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#3a6a4a";
-    ctx.beginPath(); ctx.arc(sx, sy, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(sx, sy + 11, 11, 4, 0, 0, Math.PI*2); ctx.fill();
+    // cape
+    if (p.equip.cape && ITEM_DEFS[p.equip.cape]) {
+      ctx.fillStyle = ITEM_DEFS[p.equip.cape].tint || "#8a3030";
+      ctx.fillRect(sx - 10, sy - 4, 6, 16);
+    }
+    const bodyTint = (p.equip.body && ITEM_DEFS[p.equip.body] && ITEM_DEFS[p.equip.body].tint) || "#3a6a4a";
+    ctx.fillStyle = bodyTint;
+    ctx.beginPath(); ctx.arc(sx, sy, p.r, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 3; ctx.stroke();
-    ctx.fillStyle = "#d2b48c";
-    ctx.beginPath(); ctx.arc(sx, sy - 8, 7, 0, Math.PI * 2); ctx.fill();
+    // legs
+    if (p.equip.legs && ITEM_DEFS[p.equip.legs]) {
+      ctx.fillStyle = ITEM_DEFS[p.equip.legs].tint;
+      ctx.fillRect(sx - 8, sy + 6, 7, 8); ctx.fillRect(sx + 1, sy + 6, 7, 8);
+    }
+    // head / helm
+    const headTint = (p.equip.head && ITEM_DEFS[p.equip.head] && ITEM_DEFS[p.equip.head].tint) || "#d2b48c";
+    ctx.fillStyle = headTint;
+    ctx.beginPath(); ctx.arc(sx, sy - 8, 7, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.stroke();
-    const fx = Math.cos(p.facing) * 7;
-    const fy = Math.sin(p.facing) * 7;
-    if (p.weapon) {
-      ctx.strokeStyle = "#c9c0a0"; ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(sx + fx * 0.4, sy + fy * 0.4);
-      ctx.lineTo(sx + fx * 2.4, sy + fy * 2.4);
-      ctx.stroke();
+    // boots
+    if (p.equip.feet && ITEM_DEFS[p.equip.feet]) {
+      ctx.fillStyle = ITEM_DEFS[p.equip.feet].tint;
+      ctx.fillRect(sx - 9, sy + 12, 7, 4); ctx.fillRect(sx + 2, sy + 12, 7, 4);
+    }
+    const fx = Math.cos(p.facing || 0) * 7, fy = Math.sin(p.facing || 0) * 7;
+    if (p.equip.weapon) {
+      const wdef = ITEM_DEFS[p.equip.weapon];
+      ctx.strokeStyle = wdef && wdef.style === "ranged" ? "#8a5a30" : "#c9c0a0";
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(sx + fx * 0.4, sy + fy * 0.4); ctx.lineTo(sx + fx * 2.4, sy + fy * 2.4); ctx.stroke();
     }
   }
 
-  function drawZombie(sx, sy, z) {
+  function drawCreature(sx, sy, c) {
+    const def = CREATURE_DEFS[c.type];
     ctx.fillStyle = "rgba(0,0,0,0.25)";
-    ctx.beginPath(); ctx.ellipse(sx, sy + 10, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = z.hitFlash > 0 ? "#c8e0a0" : "#5a7a40";
-    ctx.beginPath(); ctx.arc(sx, sy, z.r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 3; ctx.stroke();
-    ctx.fillStyle = "#c04040";
-    ctx.fillRect(sx - 5, sy - 5, 3, 3);
-    ctx.fillRect(sx + 2, sy - 5, 3, 3);
-    if (z.hp < 40) {
-      ctx.fillStyle = "#1a1208";
-      ctx.fillRect(sx - 12, sy - 22, 24, 4);
-      ctx.fillStyle = "#c04040";
-      ctx.fillRect(sx - 12, sy - 22, 24 * clamp(z.hp / 40, 0, 1), 4);
+    ctx.beginPath(); ctx.ellipse(sx, sy + c.r * 0.8, c.r * 0.9, 3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = c.hitFlash > 0 ? "#c8e0a0" : def.color;
+    if (c.type === "chicken") {
+      ctx.beginPath(); ctx.ellipse(sx, sy, c.r + 2, c.r, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#e05030"; ctx.beginPath(); ctx.moveTo(sx + c.r, sy); ctx.lineTo(sx + c.r + 5, sy + 2); ctx.lineTo(sx + c.r, sy + 4); ctx.fill();
+    } else if (c.type === "squirrel") {
+      ctx.beginPath(); ctx.arc(sx, sy, c.r, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(sx - c.r, sy - 2, 5, 3, -0.5, 0, Math.PI*2); ctx.fill();
+    } else if (c.type === "rat") {
+      ctx.beginPath(); ctx.ellipse(sx, sy, c.r + 2, c.r - 1, 0, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = "#4a3a30"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(sx - c.r, sy); ctx.lineTo(sx - c.r - 8, sy + 2); ctx.stroke();
+    } else if (c.type === "goblin") {
+      ctx.beginPath(); ctx.arc(sx, sy, c.r, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#d2b48c"; ctx.beginPath(); ctx.arc(sx, sy - 8, 6, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#3a5a28"; ctx.beginPath(); ctx.moveTo(sx - 6, sy - 10); ctx.lineTo(sx - 10, sy - 16); ctx.lineTo(sx - 2, sy - 12); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(sx + 6, sy - 10); ctx.lineTo(sx + 10, sy - 16); ctx.lineTo(sx + 2, sy - 12); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(sx, sy, c.r, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#c04040"; ctx.fillRect(sx - 5, sy - 5, 3, 3); ctx.fillRect(sx + 2, sy - 5, 3, 3);
+    }
+    ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(sx, sy, c.r, 0, Math.PI*2); ctx.stroke();
+    if (c.hp < c.maxHp) {
+      ctx.fillStyle = "#1a1208"; ctx.fillRect(sx - 12, sy - c.r - 10, 24, 4);
+      ctx.fillStyle = "#c04040"; ctx.fillRect(sx - 12, sy - c.r - 10, 24 * clamp(c.hp / c.maxHp, 0, 1), 4);
     }
   }
 
   function drawMinimap() {
-    const s = 72 / Math.max(WORLD_W, WORLD_H);
-    mctx.clearRect(0, 0, 72, 72);
-    mctx.fillStyle = "rgba(20,35,28,0.9)";
-    mctx.fillRect(0, 0, 72, 72);
+    const s = 76 / Math.max(WORLD_W, WORLD_H);
+    mctx.clearRect(0, 0, 76, 76);
+    mctx.fillStyle = "rgba(30,45,25,0.95)"; mctx.fillRect(0, 0, 76, 76);
     for (const prop of state.props) {
       if (prop.kind === "building") {
         mctx.fillStyle = (prop.base && prop.base.claimed) ? "#e8c860" : "#6a5438";
         mctx.fillRect(prop.x * s, prop.y * s, Math.max(2, prop.w * s), Math.max(2, prop.h * s));
       } else if (prop.kind === "campfire") {
-        mctx.fillStyle = "#e0a040";
-        mctx.fillRect(prop.x * s - 1, prop.y * s - 1, 3, 3);
+        mctx.fillStyle = "#e08020"; mctx.fillRect(prop.x * s - 1, prop.y * s - 1, 3, 3);
       }
     }
-    for (const z of state.zombies) {
-      if (!z.alive) continue;
-      mctx.fillStyle = "#c04040";
-      mctx.fillRect(z.x * s - 0.5, z.y * s - 0.5, 2, 2);
+    for (const c of state.creatures) {
+      if (!c.alive) continue;
+      mctx.fillStyle = c.type === "goblin" ? "#80c040" : c.aggressive ? "#c04040" : "#e0c080";
+      mctx.fillRect(c.x * s - 0.5, c.y * s - 0.5, 2, 2);
     }
     if (state.player) {
-      mctx.fillStyle = "#7ecf8a";
+      mctx.fillStyle = "#80c060";
       mctx.fillRect(state.player.x * s - 1.5, state.player.y * s - 1.5, 3, 3);
     }
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // HUD / UI
-  // ═══════════════════════════════════════════════════════════
+
+  // ── UI ──
   function updateHud() {
-    const p = state.player;
-    if (!p) return;
-    const hpPct = clamp(p.hp / p.maxHp, 0, 1) * 100;
-    const huPct = clamp(p.hunger / p.maxHunger, 0, 1) * 100;
-    document.querySelector("#bar-health i").style.width = hpPct + "%";
-    document.querySelector("#bar-hunger i").style.width = huPct + "%";
+    const p = state.player; if (!p) return;
+    document.querySelector("#bar-health i").style.width = clamp(p.hp / p.maxHp, 0, 1) * 100 + "%";
+    document.querySelector("#bar-hunger i").style.width = clamp(p.hunger / p.maxHunger, 0, 1) * 100 + "%";
     document.getElementById("val-health").textContent = Math.ceil(Math.max(0, p.hp));
     document.getElementById("val-hunger").textContent = Math.ceil(p.hunger);
     document.getElementById("val-day").textContent = String(state.day);
     document.getElementById("val-time").textContent = timeLabel();
-
-    // XP bar shows combat progress as a general "progress" feel
     const c = p.skills.combat;
     document.querySelector("#bar-xp i").style.width = (c.xp / c.next) * 100 + "%";
-
     const sk = document.getElementById("hud-skills");
-    sk.innerHTML = SKILL_NAMES.map((n) => {
-      const s = p.skills[n];
-      return `<span class="skill-chip">${SKILL_LABELS[n]} <strong>${s.level}</strong></span>`;
-    }).join("") + `<span class="skill-chip">Kills <strong>${p.kills}</strong></span>`
-      + (p.weapon ? `<span class="skill-chip">Weap <strong>${ITEM_DEFS[p.weapon].name}</strong></span>` : "");
+    const show = ["combat", "ranged", "woodcutting", "mining", "fishing", "cooking", "crafting", "smithing", "construction"];
+    sk.innerHTML = show.map((n) =>
+      `<span class="skill-chip">${SKILL_LABELS[n]} <strong>${p.skills[n].level}</strong></span>`
+    ).join("") + `<span class="skill-chip">Armor <strong>${armorTotal(p.equip)}</strong></span>`
+      + `<span class="skill-chip">Kills <strong>${p.kills}</strong></span>`;
   }
 
   function openOverlay(id) {
+    hideContextMenu();
     state.paused = true;
+    document.querySelectorAll(".overlay").forEach((el) => el.classList.remove("open"));
     document.getElementById(id).classList.add("open");
   }
   function closeOverlays() {
@@ -1474,188 +1312,228 @@
     state.selectedInv = -1;
   }
 
-  function renderInventory() {
-    const grid = document.getElementById("inv-grid");
-    const inv = state.player ? state.player.inv : [];
-    let html = "";
-    if (!inv.length) html = "<p>Bag is empty. Scavenge crates, trees, and bushes.</p>";
-    else {
-      html = inv.map((it, i) => {
-        const def = ITEM_DEFS[it.id] || { name: it.id };
-        const eq = state.player.weapon === it.id ? " · equipped" : "";
-        const sel = state.selectedInv === i ? " selected" : "";
-        return `<button type="button" class="inv-item${sel}" data-idx="${i}">
-          <span class="name">${def.name} ×${it.qty}</span>
-          <span class="meta">${def.type}${eq}</span>
+  function openWorkshop(tab) {
+    state.workshopTab = tab || "craft";
+    renderWorkshop();
+    openOverlay("overlay-workshop");
+  }
+
+  function renderWorkshop() {
+    const p = state.player;
+    document.querySelectorAll(".ws-tab").forEach((t) => {
+      t.classList.toggle("active", t.dataset.tab === state.workshopTab);
+    });
+    const body = document.getElementById("workshop-body");
+    const status = document.getElementById("workshop-status");
+    if (state.workshopTab === "craft" || state.workshopTab === "smith") {
+      const tab = state.workshopTab;
+      status.textContent = tab === "smith"
+        ? (hasForgeAccess() ? "Forge ready. Smelt ores or smith on anvil (Workshop)." : "Find the world forge or claim a Workshop.")
+        : "Tap a recipe to craft. Grey = missing mats/level/station.";
+      const list = RECIPES.filter((r) => r.tab === tab);
+      body.innerHTML = '<div class="craft-list" id="recipe-list"></div>';
+      const rl = document.getElementById("recipe-list");
+      rl.innerHTML = list.map((r) => {
+        const block = recipeBlocked(r, p);
+        const mats = Object.entries(r.need).map(([id, q]) => {
+          const have = invCount(p.inv, id);
+          const ok = have >= q;
+          return `<span class="${ok ? "mat-ok" : "mat-bad"}">${ITEM_DEFS[id].name} ${have}/${q}</span>`;
+        }).join(" · ");
+        const cls = block ? "craft-row disabled" : "craft-row";
+        return `<button type="button" class="${cls}" data-recipe="${r.id}">
+          <div class="craft-main">
+            <strong>${ITEM_DEFS[r.out.id].name}</strong> <span class="lvl">${SKILL_LABELS[r.skill]} ${r.level}+</span>
+            <div class="mats">${mats}</div>
+            ${block ? `<div class="block-reason">${block}</div>` : ""}
+          </div>
+          <span class="craft-go">${block ? "Locked" : "Make"}</span>
         </button>`;
       }).join("");
-    }
-    const storage = getStorageBuilding();
-    if (storage && pointInBuilding(state.player.x, state.player.y, storage)) {
-      const stash = storage.base.stash || [];
-      html += '<p style="margin-top:10px"><strong>Storage stash</strong> (survives death)</p>';
-      html += '<div class="panel-actions"><button class="btn" type="button" id="btn-stash-dep">Deposit mats/food</button>' +
-        '<button class="btn" type="button" id="btn-stash-wd">Withdraw all</button></div>';
-      html += stash.length
-        ? '<p>' + stash.map((s) => (ITEM_DEFS[s.id] ? ITEM_DEFS[s.id].name : s.id) + "×" + s.qty).join(", ") + "</p>"
-        : "<p>Stash empty.</p>";
-    }
-    grid.innerHTML = html;
-    grid.querySelectorAll(".inv-item").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.selectedInv = +btn.dataset.idx;
-        renderInventory();
+      rl.querySelectorAll("[data-recipe]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const res = doCraft(btn.dataset.recipe);
+          renderWorkshop(); updateHud();
+          if (res && res.ok) status.textContent = res.msg;
+        });
       });
-    });
-    const dep = document.getElementById("btn-stash-dep");
-    const wd = document.getElementById("btn-stash-wd");
-    if (dep) dep.addEventListener("click", () => { stashDeposit(); renderInventory(); });
-    if (wd) wd.addEventListener("click", () => { stashWithdraw(); renderInventory(); });
-  }
-
-  function renderCraft() {
-    const list = document.getElementById("craft-list");
-    const p = state.player;
-    const craftLv = p.skills.crafting.level;
-    list.innerHTML = RECIPES.map((r) => {
-      const locked = craftLv < r.skill;
-      const needShop = r.workshop && !hasWorkshop();
-      const needKit = r.kitchen && !hasKitchen();
-      const blocked = locked || needShop || needKit;
-      const can = !blocked && canAfford(r.need);
-      const needStr = Object.entries(r.need).map(([id, q]) => `${ITEM_DEFS[id].name}×${q}`).join(", ");
-      const outName = ITEM_DEFS[r.out.id].name;
-      let note = "";
-      if (needShop) note = " · need Workshop";
-      else if (needKit) note = " · need Kitchen";
-      else if (locked) note = ` · Crafting ${r.skill}+`;
-      return `<div class="craft-row">
-        <div>
-          <strong>${outName}</strong>
-          <div class="meta" style="color:var(--muted);font-size:11px;margin-top:2px">
-            Need: ${needStr}${note}
-          </div>
-        </div>
-        <button type="button" data-recipe="${r.id}" ${can ? "" : "disabled"}>Craft</button>
-      </div>`;
-    }).join("");
-    list.querySelectorAll("button[data-recipe]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        doCraft(btn.dataset.recipe);
-        renderCraft();
-        updateHud();
-      });
-    });
-  }
-
-  function doCraft(recipeId) {
-    const r = RECIPES.find((x) => x.id === recipeId);
-    if (!r || !state.player) return;
-    const p = state.player;
-    if (p.skills.crafting.level < r.skill) return;
-    if (r.workshop && !hasWorkshop()) return;
-    if (r.kitchen && !hasKitchen()) return;
-    if (!canAfford(r.need)) return;
-    const keep = new Set(r.keep || []);
-    for (const [id, q] of Object.entries(r.need)) {
-      if (keep.has(id)) continue;
-      invRemove(p.inv, id, q);
+    } else if (state.workshopTab === "build") {
+      renderBuildTab(body, status);
+    } else if (state.workshopTab === "equip") {
+      renderEquipTab(body, status);
     }
-    invAdd(p.inv, r.out.id, r.out.qty);
-    gainXp(p, "crafting", r.xp);
-    toast(`Crafted ${ITEM_DEFS[r.out.id].name}`);
-    saveGame(true);
   }
 
-  function renderBuild() {
-    const status = document.getElementById("build-status");
-    const actions = document.getElementById("build-actions");
-    if (!status || !actions) return;
+  function renderBuildTab(body, status) {
     const b = playerBuilding();
     const p = state.player;
     if (!b) {
-      status.textContent = "Walk inside a stone building, then open Build to claim or fortify it.";
-      actions.innerHTML = "";
+      status.textContent = "Stand inside a stone building to claim or fortify it.";
+      body.innerHTML = '<p class="hint">Walk into any building footprint, then open this Build tab.</p>';
       return;
     }
     const base = b.base;
     if (!base.claimed) {
-      status.textContent = "You are inside an unclaimed building.";
-      actions.innerHTML = '<button class="btn primary" type="button" id="btn-claim" style="width:100%;min-height:52px">Claim this building</button>';
-      document.getElementById("btn-claim").onclick = () => { claimBuilding(b); renderBuild(); updateHud(); };
+      status.textContent = "Inside an unclaimed building.";
+      body.innerHTML = '<button type="button" class="btn primary btn-block" id="btn-claim">Claim this building</button>';
+      document.getElementById("btn-claim").onclick = (e) => {
+        e.stopPropagation(); claimBuilding(b); renderWorkshop(); updateHud();
+      };
       return;
     }
     const tdef = BUILDING_TYPES[base.type] || BUILDING_TYPES.none;
-    status.innerHTML = "<strong>" + tdef.name + "</strong> — " + tdef.desc +
-      "<br/>Fort HP: " + base.wallHp + "/" + base.wallMax +
-      (base.boarded ? " · windows boarded" : "") +
-      (base.doorReinforced ? " · door reinforced" : "") +
-      (base.braced ? " · walls braced" : "") +
-      "<br/>Construction lvl " + p.skills.construction.level;
+    status.innerHTML = `<strong>${tdef.name}</strong> — fort ${base.wallHp}/${base.wallMax}` +
+      (base.boarded ? " · boarded" : "") + (base.doorReinforced ? " · door" : "") + (base.braced ? " · braced" : "");
     let html = "";
     if (base.type === "none") {
-      html += '<p style="margin:8px 0 4px">Designate building type:</p><div class="build-type-grid">';
+      html += '<p class="hint">Choose building type:</p><div class="build-type-grid">';
       for (const [k, def] of Object.entries(BUILDING_TYPES)) {
         if (k === "none") continue;
-        html += '<button class="btn" type="button" data-type="' + k + '">' + def.name +
-          '<br/><span style="font-weight:400;color:var(--muted)">Con ' + def.skill + '+</span></button>';
+        html += `<button type="button" class="btn" data-type="${k}">${def.name}<br/><span class="sub">Con ${def.skill}+</span></button>`;
       }
       html += "</div>";
     }
-    html += '<p style="margin:10px 0 4px">Fortify (planks &amp; nails):</p><div class="build-list">';
+    html += '<p class="hint">Fortify (planks & nails):</p><div class="craft-list">';
     for (const [key, f] of Object.entries(FORTIFY)) {
-      const needStr = Object.entries(f.need).map(([id, q]) => ITEM_DEFS[id].name + "×" + q).join(", ");
-      const can = p.skills.construction.level >= f.skill && canAfford(f.need);
-      html += '<div class="build-row"><div><strong>' + f.label + '</strong>' +
-        '<div style="color:var(--muted);font-size:11px">' + needStr + " · Con " + f.skill + "+</div></div>" +
-        '<button type="button" data-fort="' + key + '"' + (can ? "" : " disabled") + ">Build</button></div>";
+      const mats = Object.entries(f.need).map(([id, q]) => {
+        const have = invCount(p.inv, id);
+        return `<span class="${have>=q?"mat-ok":"mat-bad"}">${ITEM_DEFS[id].name} ${have}/${q}</span>`;
+      }).join(" · ");
+      const can = p.skills.construction.level >= f.skill && canAfford(p.inv, f.need);
+      html += `<button type="button" class="craft-row ${can?"":"disabled"}" data-fort="${key}">
+        <div class="craft-main"><strong>${f.label}</strong> <span class="lvl">Con ${f.skill}+</span><div class="mats">${mats}</div></div>
+        <span class="craft-go">${can?"Build":"Locked"}</span></button>`;
     }
     html += "</div>";
-    actions.innerHTML = html;
-    actions.querySelectorAll("[data-type]").forEach((btn) => {
-      btn.onclick = () => { setBuildingType(b, btn.dataset.type); renderBuild(); updateHud(); };
+    if (base.type === "workshop") {
+      html += '<p class="hint">Workshop includes forge + anvil for the Smith tab.</p>';
+    }
+    body.innerHTML = html;
+    body.querySelectorAll("[data-type]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); setBuildingType(b, btn.dataset.type); renderWorkshop(); updateHud(); };
     });
-    actions.querySelectorAll("[data-fort]").forEach((btn) => {
-      btn.onclick = () => { doFortify(b, btn.dataset.fort); renderBuild(); updateHud(); };
+    body.querySelectorAll("[data-fort]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); doFortify(b, btn.dataset.fort); renderWorkshop(); updateHud(); };
     });
+  }
+
+  function renderEquipTab(body, status) {
+    const p = state.player;
+    status.textContent = "Tap an inventory item below to equip, or unequip a slot. Armor: " + armorTotal(p.equip);
+    let html = '<div class="equip-grid">';
+    for (const slot of EQUIP_SLOTS) {
+      const id = p.equip[slot];
+      const name = id ? ITEM_DEFS[id].name : "— empty —";
+      html += `<button type="button" class="equip-slot" data-unequip="${slot}"><span class="slot-name">${slot}</span><span class="slot-item">${name}</span></button>`;
+    }
+    html += '</div><p class="hint">Equippable items in bag:</p><div class="inv-grid" id="equip-inv"></div>';
+    body.innerHTML = html;
+    const grid = document.getElementById("equip-inv");
+    const equippable = p.inv.filter((it) => {
+      const d = ITEM_DEFS[it.id];
+      return d && (d.slot || d.type === "weapon" || d.type === "armor" || d.type === "ammo" || d.type === "tool");
+    });
+    grid.innerHTML = equippable.length ? equippable.map((it) => {
+      const d = ITEM_DEFS[it.id];
+      const slot = d.slot || (d.type === "tool" ? "weapon" : "");
+      return `<button type="button" class="inv-item" data-equip="${it.id}"><span class="name">${d.name} ×${it.qty}</span><span class="meta">${slot || d.type}</span></button>`;
+    }).join("") : "<p>No equippable gear in bag.</p>";
+    body.querySelectorAll("[data-unequip]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const slot = btn.dataset.unequip;
+        if (p.equip[slot]) { /* stays in inv already */ p.equip[slot] = null; syncWeaponAlias(p); toast("Unequipped " + slot, "sys"); }
+        renderWorkshop(); updateHud(); saveGame(true);
+      };
+    });
+    grid.querySelectorAll("[data-equip]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        equipItem(btn.dataset.equip);
+        renderWorkshop(); updateHud();
+      };
+    });
+  }
+
+  function equipItem(id) {
+    const p = state.player;
+    const d = ITEM_DEFS[id];
+    if (!d || invCount(p.inv, id) <= 0) { toast("You don't have that", "bad"); return; }
+    let slot = d.slot;
+    if (!slot && d.type === "tool") slot = "weapon";
+    if (!slot && d.type === "weapon") slot = "weapon";
+    if (!slot) { toast("Can't equip that", "bad"); return; }
+    p.equip[slot] = id;
+    syncWeaponAlias(p);
+    toast("Equipped " + d.name, "good");
+    saveGame(true);
+  }
+
+  function renderInventory() {
+    const grid = document.getElementById("inv-grid");
+    const inv = state.player ? state.player.inv : [];
+    let html = "";
+    if (!inv.length) html = "<p>Bag empty.</p>";
+    else {
+      html = inv.map((it, i) => {
+        const def = ITEM_DEFS[it.id] || { name: it.id };
+        const eq = Object.values(state.player.equip).includes(it.id) ? " · worn" : "";
+        const sel = state.selectedInv === i ? " selected" : "";
+        return `<button type="button" class="inv-item${sel}" data-idx="${i}"><span class="name">${def.name} ×${it.qty}</span><span class="meta">${def.type}${eq}</span></button>`;
+      }).join("");
+    }
+    const storage = getStorageBuilding();
+    if (storage && pointInBuilding(state.player.x, state.player.y, storage)) {
+      html += '<p style="margin-top:10px"><strong>Storage stash</strong></p>';
+      html += '<div class="panel-actions"><button class="btn" type="button" id="btn-stash-dep">Deposit mats/food</button><button class="btn" type="button" id="btn-stash-wd">Withdraw</button></div>';
+      const stash = storage.base.stash || [];
+      html += stash.length ? "<p>" + stash.map((s) => (ITEM_DEFS[s.id]?.name || s.id) + "×" + s.qty).join(", ") + "</p>" : "<p>Empty.</p>";
+    }
+    grid.innerHTML = html;
+    grid.querySelectorAll(".inv-item").forEach((btn) => {
+      btn.addEventListener("click", () => { state.selectedInv = +btn.dataset.idx; renderInventory(); });
+    });
+    const dep = document.getElementById("btn-stash-dep");
+    const wd = document.getElementById("btn-stash-wd");
+    if (dep) dep.onclick = () => { stashDeposit(); renderInventory(); };
+    if (wd) wd.onclick = () => { stashWithdraw(); renderInventory(); };
   }
 
   function stashDeposit() {
     const storage = getStorageBuilding();
-    if (!storage || !pointInBuilding(state.player.x, state.player.y, storage)) return;
-    const p = state.player;
-    const keep = [];
+    if (!storage) return;
+    const p = state.player, keep = [];
     for (const it of p.inv) {
       const t = ITEM_DEFS[it.id] && ITEM_DEFS[it.id].type;
-      if (t === "mat" || t === "food" || t === "heal") invAdd(storage.base.stash, it.id, it.qty, 24);
+      if (t === "mat" || t === "food" || t === "heal" || t === "ammo") invAdd(storage.base.stash, it.id, it.qty, 40);
       else keep.push(it);
     }
     p.inv = keep;
-    if (p.weapon && !p.inv.some((i) => i.id === p.weapon)) p.weapon = null;
-    toast("Deposited to stash");
-    saveGame(true);
+    // clear equip refs missing from inv
+    for (const slot of EQUIP_SLOTS) {
+      if (p.equip[slot] && invCount(p.inv, p.equip[slot]) <= 0) p.equip[slot] = null;
+    }
+    syncWeaponAlias(p);
+    toast("Deposited", "good"); saveGame(true);
   }
   function stashWithdraw() {
     const storage = getStorageBuilding();
-    if (!storage || !pointInBuilding(state.player.x, state.player.y, storage)) return;
+    if (!storage) return;
     const left = [];
     for (const it of storage.base.stash) {
       const before = invCount(state.player.inv, it.id);
-      invAdd(state.player.inv, it.id, it.qty);
+      invAdd(state.player.inv, it.id, it.qty, MAX_INV);
       const took = invCount(state.player.inv, it.id) - before;
       if (took < it.qty) left.push({ id: it.id, qty: it.qty - took });
     }
     storage.base.stash = left;
-    toast("Withdrew from stash");
-    saveGame(true);
+    toast("Withdrew", "good"); saveGame(true);
   }
 
   function useSelected() {
     const p = state.player;
-    if (!p || state.selectedInv < 0 || state.selectedInv >= p.inv.length) {
-      toast("Select an item first");
-      return;
-    }
+    if (!p || state.selectedInv < 0 || state.selectedInv >= p.inv.length) { toast("Select an item", "bad"); return; }
     const it = p.inv[state.selectedInv];
     const def = ITEM_DEFS[it.id];
     if (!def) return;
@@ -1663,46 +1541,27 @@
       p.hp = Math.min(p.maxHp, p.hp + (def.heal || 0));
       p.hunger = Math.min(p.maxHunger, p.hunger + (def.hunger || 0));
       invRemove(p.inv, it.id, 1);
-      toast(`Used ${def.name}`);
+      toast("Used " + def.name, "good");
       if (state.selectedInv >= p.inv.length) state.selectedInv = -1;
-      renderInventory();
-      updateHud();
-      saveGame();
-    } else if (def.type === "weapon") {
-      p.weapon = it.id;
-      toast(`Equipped ${def.name}`);
-      renderInventory();
-      updateHud();
-      saveGame();
-    } else {
-      toast("Can't use that directly — try crafting");
-    }
+      renderInventory(); updateHud(); saveGame(true);
+    } else if (def.slot || def.type === "weapon" || def.type === "armor" || def.type === "ammo" || def.type === "tool") {
+      equipItem(it.id); renderInventory(); updateHud();
+    } else toast("Open Skills → Craft/Smith for materials", "sys");
   }
-
   function dropSelected() {
     const p = state.player;
-    if (!p || state.selectedInv < 0 || state.selectedInv >= p.inv.length) {
-      toast("Select an item first");
-      return;
-    }
+    if (!p || state.selectedInv < 0 || state.selectedInv >= p.inv.length) { toast("Select an item", "bad"); return; }
     const it = p.inv[state.selectedInv];
-    if (p.weapon === it.id) p.weapon = null;
-    state.lootPiles.push({
-      x: p.x + 20, y: p.y,
-      items: [{ id: it.id, qty: it.qty }],
-      life: 99999,
-    });
+    for (const slot of EQUIP_SLOTS) if (p.equip[slot] === it.id) p.equip[slot] = null;
+    syncWeaponAlias(p);
+    state.lootPiles.push({ x: p.x + 18, y: p.y, items: [{ id: it.id, qty: it.qty }], life: 99999 });
     p.inv.splice(state.selectedInv, 1);
     state.selectedInv = -1;
-    toast("Dropped");
-    renderInventory();
-    updateHud();
-    saveGame();
+    toast("Dropped", "sys"); renderInventory(); updateHud(); saveGame(true);
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // LOOP & BOOT
-  // ═══════════════════════════════════════════════════════════
+
+  // ── Boot ──
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
@@ -1717,34 +1576,22 @@
     document.getElementById("btn-continue").disabled = !hasSave();
     state.running = false;
   }
-
-  function hideTitle() {
-    document.getElementById("title-screen").classList.add("hidden");
-  }
+  function hideTitle() { document.getElementById("title-screen").classList.add("hidden"); }
 
   function beginPlay(fromSave) {
-    hideTitle();
-    closeOverlays();
+    hideTitle(); closeOverlays(); hideContextMenu();
     if (fromSave) {
-      if (!loadGame()) {
-        startNewGame();
-      } else {
-        state.running = true;
-        state.paused = false;
-        toast("Welcome back");
-      }
-    } else {
-      startNewGame();
-    }
+      if (!loadGame()) startNewGame();
+      else { state.running = true; state.paused = false; toast("Welcome back", "sys"); }
+    } else startNewGame();
     updateHud();
     if (!state.tutorialShown) {
       state.tutorialShown = true;
       setTimeout(() => openOverlay("overlay-help"), 400);
-      saveGame();
+      saveGame(true);
     }
   }
 
-  // Wire UI
   document.getElementById("btn-new").addEventListener("click", () => {
     if (hasSave() && !confirm("Start a new game? Current save will be overwritten.")) return;
     beginPlay(false);
@@ -1758,64 +1605,47 @@
     document.getElementById("overlay-help").classList.remove("open");
     if (state.running) state.paused = false;
   });
-  document.getElementById("btn-inv").addEventListener("click", () => {
-    renderInventory();
-    openOverlay("overlay-inv");
-  });
+  document.getElementById("btn-inv").addEventListener("click", () => { renderInventory(); openOverlay("overlay-inv"); });
   document.getElementById("btn-close-inv").addEventListener("click", closeOverlays);
   document.getElementById("btn-use").addEventListener("click", useSelected);
   document.getElementById("btn-drop").addEventListener("click", dropSelected);
-  document.getElementById("btn-craft").addEventListener("click", () => {
-    renderCraft();
-    openOverlay("overlay-craft");
+  document.getElementById("btn-skills").addEventListener("click", () => openWorkshop(state.workshopTab || "craft"));
+  document.getElementById("btn-close-workshop").addEventListener("click", closeOverlays);
+  document.querySelectorAll(".ws-tab").forEach((tab) => {
+    tab.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.workshopTab = tab.dataset.tab;
+      renderWorkshop();
+    });
   });
-  document.getElementById("btn-close-craft").addEventListener("click", closeOverlays);
-  const btnBuild = document.getElementById("btn-build");
-  if (btnBuild) btnBuild.addEventListener("click", () => { renderBuild(); openOverlay("overlay-build"); });
-  const btnCloseBuild = document.getElementById("btn-close-build");
-  if (btnCloseBuild) btnCloseBuild.addEventListener("click", closeOverlays);
   document.getElementById("btn-menu").addEventListener("click", () => openOverlay("overlay-menu"));
   document.getElementById("btn-resume").addEventListener("click", closeOverlays);
-  document.getElementById("btn-save").addEventListener("click", () => { saveGame(); });
+  document.getElementById("btn-save").addEventListener("click", () => saveGame(false));
   document.getElementById("btn-reset").addEventListener("click", () => {
     if (!confirm("Delete your Ashen Vale save on this device?")) return;
-    resetSave();
-    closeOverlays();
-    showTitle();
-    toast("Save deleted");
+    resetSave(); closeOverlays(); showTitle(); toast("Save deleted", "sys");
   });
 
-  window.addEventListener("resize", resize);
-  window.addEventListener("orientationchange", () => setTimeout(resize, 100));
+  // Overlay backdrop closes; panel stops propagation
+  document.querySelectorAll(".overlay").forEach((ov) => {
+    ov.addEventListener("click", (e) => {
+      if (e.target === ov) closeOverlays();
+    });
+    const panel = ov.querySelector(".panel");
+    if (panel) panel.addEventListener("click", (e) => e.stopPropagation());
+  });
+  document.getElementById("context-dismiss").addEventListener("click", hideContextMenu);
 
-  // Expose for Node tests (optional)
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", () => setTimeout(resize, 120));
+
   window.AshenVale = {
-    state,
-    ITEM_DEFS,
-    RECIPES,
-    FORTIFY,
-    BUILDING_TYPES,
-    invAdd,
-    invRemove,
-    invCount,
-    xpToNext,
-    gainXp,
-    createPlayer,
-    generateWorld,
-    weaponDmg,
-    serialize,
-    clientToWorld,
-    migrateSkills,
-    pointInBuilding,
-    defaultBase,
-    claimBuilding,
-    setBuildingType,
-    doFortify,
-    SAVE_KEY,
-    SAVE_KEY_LEGACY,
-    WORLD_W,
-    WORLD_H,
-    SKILL_NAMES,
+    state, D, ITEM_DEFS, RECIPES, FORTIFY, BUILDING_TYPES, CREATURE_DEFS, NODE_DEFS,
+    invAdd, invRemove, invCount, canAfford, payNeed, xpToNext, gainXp,
+    createPlayer, generateWorld, serialize, clientToWorld, migrateSkills,
+    emptyEquip, armorTotal, reduceDamage, meleeDamage, rangedDamage, consumeAmmo,
+    cookOutcome, recipeBlocked, doCraft, bestToolTier, defaultBase, pointInBuilding,
+    SAVE_KEY, SAVE_KEY_LEGACY, SKILL_NAMES, WORLD_W, WORLD_H, EQUIP_SLOTS,
   };
 
   resize();
