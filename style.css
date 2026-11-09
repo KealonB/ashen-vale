@@ -580,3 +580,7 @@ button.craft-row.disabled .craft-go {
   color: var(--accent);
 }
 .ctx-cancel { color: var(--muted); border-top: 1px solid var(--panel-border); margin-top: 2px; }
+
+.subhead { color: var(--accent); font-size: 14px; margin: 12px 0 6px; font-family: Georgia, serif; }
+.selected-place { border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent-dim); }
+#qty-sheet .panel { text-align: center; }

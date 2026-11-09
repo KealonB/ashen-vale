@@ -1,5 +1,5 @@
 /**
- * Ashen Vale Phase 1 — STATE / UPDATE / RENDER
+ * Ashen Vale Phase 1+2 — STATE / UPDATE / RENDER
  * Depends on data.js (window.AshenData)
  */
 (function () {
@@ -8,10 +8,13 @@
   const {
     SAVE_KEY, SAVE_KEY_LEGACY, SKILL_NAMES, SKILL_LABELS, EQUIP_SLOTS,
     BUILDING_TYPES, FORTIFY, ITEM_DEFS, RECIPES, NODE_DEFS, CREATURE_DEFS,
+    FURNITURE_DEFS, SHOP_STOCK_DEFAULT,
     xpToNext, emptySkills, migrateSkills, emptyEquip,
     invCount, invAdd, invRemove, canAfford, payNeed,
     bestToolTier, armorTotal, reduceDamage, meleeDamage, rangedDamage,
     consumeAmmo, cookOutcome, clientToWorld, defaultBase,
+    furnitureFits, furnitureRect, rectsOverlap, bankDeposit, bankWithdraw,
+    shopBuy, shopSell,
   } = D;
 
   const WORLD_W = 2800, WORLD_H = 2800, TILE = 32;
@@ -25,7 +28,28 @@
     particles: [], floatTexts: [], tapMarkers: [], projectiles: [],
     msgLog: [], selectedInv: -1, deathTimer: 0, tutorialShown: false, seed: 1,
     contextMenu: null, longPress: null, workshopTab: "craft",
+    mapId: "overworld",
+    interiors: {}, // id -> { w, h, outdoorExit:{x,y}, buildingRefId }
+    bank: [],
+    shop: { stock: [], restockTimer: 0 },
+    placeMode: null, // { type, rot }
+    selectedBank: -1,
+    toastTimer: 0, toastMsg: "",
   };
+
+  function onMap(obj) { return (obj.mapId || "overworld") === state.mapId; }
+  function activeProps() { return state.props.filter(onMap); }
+  function activeCreatures() { return state.creatures.filter((c) => c.alive && onMap(c)); }
+  function activeLoot() { return state.lootPiles.filter(onMap); }
+  function currentInterior() {
+    if (!state.mapId.startsWith("int_")) return null;
+    return state.interiors[state.mapId.slice(4)] || null;
+  }
+  function mapWorldSize() {
+    const i = currentInterior();
+    if (i) return { w: i.w, h: i.h };
+    return { w: WORLD_W, h: WORLD_H };
+  }
 
   function toast(msg, kind) {
     state.toastMsg = msg; state.toastTimer = 2.2;
@@ -93,22 +117,42 @@
     return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
   }
   function buildingCenter(b) { return { x: b.x + b.w / 2, y: b.y + b.h / 2 }; }
-  function buildingsList() { return state.props.filter((p) => p.kind === "building"); }
+  function buildingsList() { return state.props.filter((p) => p.kind === "building" && (p.mapId || "overworld") === "overworld"); }
   function buildingAt(x, y) {
     for (const b of buildingsList()) if (pointInBuilding(x, y, b)) return b;
     return null;
   }
-  function playerBuilding() { return state.player ? buildingAt(state.player.x, state.player.y) : null; }
-  function hasWorkshop() { return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop"); }
-  function hasKitchen() { return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "kitchen"); }
+  function playerBuilding() {
+    if (!state.player) return null;
+    if (state.mapId.startsWith("int_")) return getBuildingById(state.mapId.slice(4));
+    return buildingAt(state.player.x, state.player.y);
+  }
+  function hasWorkshop() {
+    return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop") || hasFurnitureFn("craft");
+  }
+  function hasKitchen() {
+    return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "kitchen") || hasFurnitureFn("cook");
+  }
   function hasForgeAccess() {
     if (state.props.some((p) => p.kind === "forge")) return true;
-    return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop" && (b.base.hasForge || true));
-  }
-  function hasAnvilAccess() {
+    if (hasFurnitureFn("forge")) return true;
     return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop");
   }
-  function getSafehouse() { return buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "safehouse"); }
+  function hasAnvilAccess() {
+    if (hasFurnitureFn("anvil")) return true;
+    return buildingsList().some((b) => b.base && b.base.claimed && b.base.type === "workshop");
+  }
+  function getSafehouse() {
+    const typed = buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "safehouse");
+    if (typed) return typed;
+    // Bed furniture implies safehouse function
+    const bed = state.props.find((p) => p.kind === "furniture" && p.fn === "respawn");
+    if (bed) {
+      const bid = (bed.mapId || "").replace("int_", "");
+      return getBuildingById(bid) || null;
+    }
+    return null;
+  }
   function getStorageBuilding() { return buildingsList().find((b) => b.base && b.base.claimed && b.base.type === "storage"); }
 
   function propCenter(prop) {
@@ -129,82 +173,174 @@
     };
   }
 
+  function buildInterior(id, outdoorExit, opts, rnd) {
+    opts = opts || {};
+    // Do NOT use outdoor building w/h — those are footprint size, not room size
+    const w = opts.interiorW || 360, h = opts.interiorH || 280;
+    const mapId = "int_" + id;
+    const room = { w, h };
+    state.interiors[id] = { w, h, outdoorExit: { x: outdoorExit.x, y: outdoorExit.y }, mapId };
+    const props = [];
+    // Floor marker (visual only)
+    props.push({ kind: "floor", mapId, x: 0, y: 0, w, h, solid: false });
+    // Walls as solid strips
+    const t = 14;
+    props.push({ kind: "wall", mapId, x: 0, y: 0, w, h: t, solid: true });
+    props.push({ kind: "wall", mapId, x: 0, y: h - t, w, h: t, solid: true });
+    props.push({ kind: "wall", mapId, x: 0, y: 0, w: t, h, solid: true });
+    props.push({ kind: "wall", mapId, x: w - t, y: 0, w: t, h, solid: true });
+    // Door exit at bottom center
+    props.push({ kind: "door", mapId, x: w / 2, y: h - t / 2, r: 18, solid: false, exit: true, buildingId: id });
+    // Clear door gap in bottom wall visually handled in render
+    // Containers
+    const containers = opts.publicBank ? 1 : 2 + Math.floor(rnd() * 2);
+    for (let i = 0; i < containers; i++) {
+      props.push({
+        kind: "cupboard", mapId,
+        x: 50 + rnd() * (w - 100), y: 50 + rnd() * (h - 120),
+        r: 14, solid: true, hp: 1, loot: pickLoot(rnd),
+      });
+    }
+    if (opts.fridge) {
+      props.push({
+        kind: "fridge", mapId, x: w - 60, y: 70, r: 16, solid: true, hp: 1,
+        loot: [{ id: "canned", qty: 1 }, { id: "water", qty: 1 }, { id: "raw_meat", qty: 1 }],
+      });
+    }
+    if (opts.publicBank) {
+      props.push({
+        kind: "furniture", furniture: "bank_chest", mapId,
+        x: w / 2, y: h / 2 - 20, rot: 0, solid: true, fn: "bank", placed: true,
+      });
+    }
+    if (opts.trader) {
+      props.push({ kind: "trader", mapId, x: w / 2 + 40, y: h / 2 + 10, r: 14, solid: true, name: "Mira the Trader" });
+      // starter furniture for shop look
+      props.push({ kind: "furniture", furniture: "table", mapId, x: w / 2 + 40, y: h / 2 + 40, rot: 0, solid: true, fn: null, placed: true });
+    }
+    // Zombies inside some unclaimed homes
+    const creatures = [];
+    if (opts.spawnZombies) {
+      const n = 1 + Math.floor(rnd() * 2);
+      for (let i = 0; i < n; i++) {
+        const c = makeCreature("zombie", 80 + rnd() * (w - 160), 80 + rnd() * (h - 160), rnd);
+        c.mapId = mapId;
+        creatures.push(c);
+      }
+    }
+    return { props, creatures };
+  }
+
   function generateWorld(seed) {
     const rnd = mulberry32(seed);
     const props = [], creatures = [], lootPiles = [];
+    state.interiors = {};
     const cx = WORLD_W / 2, cy = WORLD_H / 2;
-    props.push({ kind: "campfire", x: cx, y: cy, r: 18, solid: false, cook: true });
-    props.push({ kind: "forge", x: cx - 60, y: cy + 80, r: 16, solid: true });
+    props.push({ kind: "campfire", mapId: "overworld", x: cx, y: cy, r: 18, solid: false, cook: true });
+    props.push({ kind: "forge", mapId: "overworld", x: cx - 60, y: cy + 80, r: 16, solid: true });
 
     const buildings = [
-      { x: cx - 300, y: cy - 80, w: 130, h: 110 },
-      { x: cx + 180, y: cy - 220, w: 140, h: 110 },
-      { x: cx - 120, y: cy + 240, w: 160, h: 100 },
-      { x: cx + 320, y: cy + 140, w: 110, h: 120 },
-      { x: cx - 460, y: cy + 60, w: 120, h: 100 },
+      { id: "b0", x: cx - 300, y: cy - 80, w: 130, h: 110, fridge: true, spawnZombies: true },
+      { id: "b1", x: cx + 180, y: cy - 220, w: 140, h: 110, fridge: true, spawnZombies: true },
+      { id: "b2", x: cx - 120, y: cy + 240, w: 160, h: 100, spawnZombies: false },
+      { id: "b3", x: cx + 320, y: cy + 140, w: 110, h: 120, spawnZombies: true },
+      { id: "bank", x: cx - 80, y: cy - 280, w: 140, h: 100, publicBank: true, safe: true },
+      { id: "shop", x: cx + 40, y: cy - 280, w: 150, h: 110, trader: true, safe: true },
     ];
     for (const b of buildings) {
-      props.push({ kind: "building", x: b.x, y: b.y, w: b.w, h: b.h, solid: true, base: defaultBase() });
+      const outdoorExit = { x: b.x + b.w / 2, y: b.y + b.h + 18 };
       props.push({
-        kind: "crate", x: b.x + 20 + rnd() * (b.w - 40), y: b.y + b.h + 20 + rnd() * 24,
-        r: 12, solid: true, hp: 1, node: null,
-        loot: pickLoot(rnd),
+        kind: "building", mapId: "overworld", id: b.id,
+        x: b.x, y: b.y, w: b.w, h: b.h, solid: true, base: defaultBase(),
+        doorX: outdoorExit.x, doorY: outdoorExit.y,
+        publicBank: !!b.publicBank, trader: !!b.trader, safe: !!b.safe,
       });
+      // outdoor door marker
+      props.push({
+        kind: "door", mapId: "overworld", x: outdoorExit.x, y: outdoorExit.y,
+        r: 16, solid: false, enter: true, buildingId: b.id,
+      });
+      props.push({
+        kind: "crate", mapId: "overworld",
+        x: b.x + 20 + rnd() * (b.w - 40), y: b.y + b.h + 28 + rnd() * 20,
+        r: 12, solid: true, hp: 1, loot: pickLoot(rnd),
+      });
+      const interior = buildInterior(b.id, outdoorExit, b, rnd);
+      props.push.apply(props, interior.props);
+      creatures.push.apply(creatures, interior.creatures);
     }
 
     // Goblin camp
     const gx = cx + 520, gy = cy - 380;
-    props.push({ kind: "building", x: gx, y: gy, w: 90, h: 70, solid: true, base: defaultBase(), goblinHut: true });
+    props.push({
+      kind: "building", mapId: "overworld", id: "gob",
+      x: gx, y: gy, w: 90, h: 70, solid: true, base: defaultBase(), goblinHut: true,
+      doorX: gx + 45, doorY: gy + 88,
+    });
+    props.push({ kind: "door", mapId: "overworld", x: gx + 45, y: gy + 88, r: 16, solid: false, enter: true, buildingId: "gob" });
+    const gobInt = buildInterior("gob", { x: gx + 45, y: gy + 88 }, { interiorW: 300, interiorH: 240, spawnZombies: false }, rnd);
+    props.push.apply(props, gobInt.props);
     for (let i = 0; i < 5; i++) {
-      creatures.push(makeCreature("goblin", gx + 40 + (rnd() - 0.5) * 120, gy + 80 + rnd() * 80, rnd));
+      const g = makeCreature("goblin", gx + 40 + (rnd() - 0.5) * 120, gy + 80 + rnd() * 80, rnd);
+      g.mapId = "overworld";
+      creatures.push(g);
     }
 
+    const bRects = buildings.map((b) => ({ x: b.x, y: b.y, w: b.w, h: b.h }));
     for (let i = 0; i < 55; i++) {
       const x = 80 + rnd() * (WORLD_W - 160), y = 80 + rnd() * (WORLD_H - 160);
       if (Math.hypot(x - cx, y - cy) < 110) continue;
-      if (nearBuilding(x, y, buildings, 40)) continue;
+      if (nearBuilding(x, y, bRects, 40)) continue;
       const kind = rnd() < 0.72 ? "tree" : "oak";
-      props.push({ kind, x, y, r: kind === "oak" ? 18 : 15, solid: true, hp: kind === "oak" ? 4 : 3, node: kind });
+      props.push({ kind, mapId: "overworld", x, y, r: kind === "oak" ? 18 : 15, solid: true, hp: kind === "oak" ? 4 : 3, node: kind });
     }
     for (let i = 0; i < 28; i++) {
       const x = 80 + rnd() * (WORLD_W - 160), y = 80 + rnd() * (WORLD_H - 160);
       if (Math.hypot(x - cx, y - cy) < 100) continue;
-      props.push({ kind: "bush", x, y, r: 12, solid: false, hp: 1, node: "bush" });
+      props.push({ kind: "bush", mapId: "overworld", x, y, r: 12, solid: false, hp: 1, node: "bush" });
     }
     const rockKinds = ["copper_rock", "tin_rock", "iron_rock", "scrapheap"];
     for (let i = 0; i < 36; i++) {
       const x = 80 + rnd() * (WORLD_W - 160), y = 80 + rnd() * (WORLD_H - 160);
       if (Math.hypot(x - cx, y - cy) < 120) continue;
       const kind = rockKinds[Math.floor(rnd() * rockKinds.length)];
-      props.push({ kind, x, y, r: 14, solid: true, hp: kind === "iron_rock" ? 4 : 3, node: kind });
+      props.push({ kind, mapId: "overworld", x, y, r: 14, solid: true, hp: kind === "iron_rock" ? 4 : 3, node: kind });
     }
-    // fishing spots near "pond" area
     for (let i = 0; i < 6; i++) {
       props.push({
-        kind: "fish_spot", x: cx - 200 + rnd() * 80, y: cy + 400 + rnd() * 60,
+        kind: "fish_spot", mapId: "overworld", x: cx - 200 + rnd() * 80, y: cy + 400 + rnd() * 60,
         r: 16, solid: false, hp: 99, node: "fish_spot", infinite: true,
       });
     }
-    // pond visual markers
-    props.push({ kind: "pond", x: cx - 160, y: cy + 430, w: 120, h: 70, solid: false });
+    props.push({ kind: "pond", mapId: "overworld", x: cx - 160, y: cy + 430, w: 120, h: 70, solid: false });
 
     lootPiles.push({
-      x: cx + 45, y: cy - 35,
-      items: [{ id: "cloth", qty: 2 }, { id: "water", qty: 1 }, { id: "feather", qty: 3 }, { id: "string", qty: 1 }],
+      mapId: "overworld", x: cx + 45, y: cy - 35,
+      items: [{ id: "cloth", qty: 2 }, { id: "water", qty: 1 }, { id: "feather", qty: 3 }, { id: "string", qty: 1 }, { id: "coins", qty: 25 }, { id: "stone", qty: 6 }],
       life: 99999,
     });
 
     for (let i = 0; i < 22; i++) {
       let x, y, t = 0;
       do { x = 100 + rnd() * (WORLD_W - 200); y = 100 + rnd() * (WORLD_H - 200); t++; }
-      while ((Math.hypot(x - cx, y - cy) < 240 || nearBuilding(x, y, buildings, 20)) && t < 40);
-      creatures.push(makeCreature("zombie", x, y, rnd));
+      while ((Math.hypot(x - cx, y - cy) < 240 || nearBuilding(x, y, bRects, 20)) && t < 40);
+      const z = makeCreature("zombie", x, y, rnd); z.mapId = "overworld"; creatures.push(z);
     }
-    for (let i = 0; i < 10; i++) creatures.push(makeCreature("rat", cx - 350 + rnd() * 80, cy - 40 + rnd() * 80, rnd));
-    for (let i = 0; i < 8; i++) creatures.push(makeCreature("squirrel", 200 + rnd() * (WORLD_W - 400), 200 + rnd() * (WORLD_H - 400), rnd));
-    for (let i = 0; i < 8; i++) creatures.push(makeCreature("chicken", 200 + rnd() * (WORLD_W - 400), 200 + rnd() * (WORLD_H - 400), rnd));
+    for (let i = 0; i < 10; i++) {
+      const c = makeCreature("rat", cx - 350 + rnd() * 80, cy - 40 + rnd() * 80, rnd); c.mapId = "overworld"; creatures.push(c);
+    }
+    for (let i = 0; i < 8; i++) {
+      const c = makeCreature("squirrel", 200 + rnd() * (WORLD_W - 400), 200 + rnd() * (WORLD_H - 400), rnd); c.mapId = "overworld"; creatures.push(c);
+    }
+    for (let i = 0; i < 8; i++) {
+      const c = makeCreature("chicken", 200 + rnd() * (WORLD_W - 400), 200 + rnd() * (WORLD_H - 400), rnd); c.mapId = "overworld"; creatures.push(c);
+    }
 
-    return { props, creatures, lootPiles, spawn: { x: cx, y: cy + 45 } };
+    return {
+      props, creatures, lootPiles, spawn: { x: cx, y: cy + 45 },
+      shop: { stock: SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s)), restockTimer: 120 },
+      bank: [],
+    };
   }
 
   function nearBuilding(x, y, buildings, pad) {
@@ -222,23 +358,144 @@
     return pool[Math.floor(rnd() * pool.length)].map((x) => Object.assign({}, x));
   }
 
+  function getBuildingById(id) {
+    return state.props.find((p) => p.kind === "building" && p.id === id);
+  }
+
+  function enterBuilding(buildingId) {
+    const b = getBuildingById(buildingId);
+    const interior = state.interiors[buildingId];
+    if (!b || !interior) { toast("Can't enter", "bad"); return false; }
+    // Fortified claimed buildings: player may enter; zombies blocked separately
+    state.mapId = interior.mapId;
+    state.player.x = interior.w / 2;
+    state.player.y = interior.h - 40;
+    state.player.target = null;
+    state.placeMode = null;
+    toast("Entered building", "sys");
+    return true;
+  }
+
+  function exitBuilding() {
+    const int = currentInterior();
+    if (!int) return false;
+    const bid = state.mapId.slice(4);
+    state.mapId = "overworld";
+    state.player.x = int.outdoorExit.x;
+    state.player.y = int.outdoorExit.y + 10;
+    state.player.target = null;
+    state.placeMode = null;
+    toast("Back outside", "sys");
+    return true;
+  }
+
+  function tryDoor(prop) {
+    if (prop.exit) return exitBuilding();
+    if (prop.enter && prop.buildingId) return enterBuilding(prop.buildingId);
+    return false;
+  }
+
+  function interiorFurniture() {
+    return activeProps().filter((p) => p.kind === "furniture");
+  }
+
+  function hasFurnitureFn(fn) {
+    // on current map or any claimed workshop furniture globally
+    if (activeProps().some((p) => p.kind === "furniture" && p.fn === fn)) return true;
+    if (fn === "forge" && state.props.some((p) => p.kind === "forge" && (p.mapId || "overworld") === "overworld")) return true;
+    return state.props.some((p) => p.kind === "furniture" && p.fn === fn);
+  }
+
+  function placeFurnitureAt(wx, wy) {
+    if (!state.placeMode) return false;
+    const int = currentInterior();
+    if (!int) { toast("Place furniture inside a building", "bad"); return false; }
+    const bid = state.mapId.slice(4);
+    const b = getBuildingById(bid);
+    if (!b || !b.base || !b.base.claimed) { toast("Claim the building first", "bad"); return false; }
+    const type = state.placeMode.type;
+    const def = FURNITURE_DEFS[type];
+    if (!def) return false;
+    const p = state.player;
+    if (p.skills.construction.level < def.skill) { toast("Need Construction " + def.skill, "bad"); return false; }
+    if (!canAfford(p.inv, def.cost)) {
+      toast("Need " + Object.entries(def.cost).map(([id,q]) => ITEM_DEFS[id].name + " " + invCount(p.inv,id) + "/" + q).join(", "), "bad");
+      return false;
+    }
+    const rot = state.placeMode.rot || 0;
+    if (!furnitureFits(wx, wy, def, rot, int)) { toast("Can't place there", "bad"); return false; }
+    const rect = furnitureRect(wx, wy, def, rot);
+    for (const f of interiorFurniture()) {
+      const fd = FURNITURE_DEFS[f.furniture];
+      if (!fd) continue;
+      if (rectsOverlap(rect, furnitureRect(f.x, f.y, fd, f.rot || 0), 2)) {
+        toast("Blocked by other furniture", "bad"); return false;
+      }
+    }
+    // avoid door
+    if (Math.hypot(wx - int.w/2, wy - (int.h - 20)) < 36) { toast("Don't block the door", "bad"); return false; }
+    payNeed(p.inv, def.cost);
+    state.props.push({
+      kind: "furniture", furniture: type, mapId: state.mapId,
+      x: wx, y: wy, rot, solid: !def.floor, fn: def.fn, placed: true,
+    });
+    gainXp(p, "construction", def.xp);
+    toast("Placed " + def.name, "good");
+    saveGame(true);
+    return true;
+  }
+
+  function pickupFurniture(prop) {
+    if (!prop || prop.kind !== "furniture" || !prop.placed) return false;
+    const def = FURNITURE_DEFS[prop.furniture];
+    // refund half mats roughly as plank
+    if (def && def.cost.plank) invAdd(state.player.inv, "plank", Math.max(1, Math.floor(def.cost.plank / 2)), MAX_INV);
+    const idx = state.props.indexOf(prop);
+    if (idx >= 0) state.props.splice(idx, 1);
+    toast("Picked up " + (def ? def.name : "furniture"), "sys");
+    saveGame(true);
+    return true;
+  }
+
+  function rotateFurniture(prop) {
+    if (!prop || prop.kind !== "furniture") return;
+    prop.rot = ((prop.rot || 0) + 1) % 4;
+    toast("Rotated", "sys");
+    saveGame(true);
+  }
+
+  function getCoins(p) { return invCount(p.inv, "coins"); }
+  function setCoins(p, n) {
+    invRemove(p.inv, "coins", invCount(p.inv, "coins"));
+    if (n > 0) invAdd(p.inv, "coins", n, MAX_INV);
+  }
+
+
 
   // ── Persistence ──
   function serialize() {
     return {
-      v: 3, seed: state.seed, day: state.day, dayTimer: state.dayTimer, time: state.time,
+      v: 4, seed: state.seed, day: state.day, dayTimer: state.dayTimer, time: state.time,
+      mapId: state.mapId,
+      interiors: state.interiors,
+      bank: state.bank,
+      shop: state.shop,
       player: {
         x: state.player.x, y: state.player.y, hp: state.player.hp, maxHp: state.player.maxHp,
         hunger: state.player.hunger, inv: state.player.inv, skills: state.player.skills,
         equip: state.player.equip, kills: state.player.kills,
       },
       creatures: state.creatures.filter((c) => c.alive).map((c) => ({
-        id: c.id, type: c.type, x: c.x, y: c.y, hp: c.hp, speed: c.speed,
+        id: c.id, type: c.type, x: c.x, y: c.y, hp: c.hp, speed: c.speed, mapId: c.mapId || "overworld",
       })),
       props: state.props.map((p) => ({
-        kind: p.kind, x: p.x, y: p.y, w: p.w, h: p.h, r: p.r, solid: p.solid,
+        kind: p.kind, id: p.id, mapId: p.mapId || "overworld",
+        x: p.x, y: p.y, w: p.w, h: p.h, r: p.r, solid: p.solid,
         hp: p.hp, node: p.node, loot: p.loot, base: p.base || null, cook: p.cook,
-        infinite: p.infinite, goblinHut: p.goblinHut,
+        infinite: p.infinite, goblinHut: p.goblinHut, furniture: p.furniture, rot: p.rot,
+        fn: p.fn, placed: p.placed, enter: p.enter, exit: p.exit, buildingId: p.buildingId,
+        doorX: p.doorX, doorY: p.doorY, publicBank: p.publicBank, trader: p.trader, safe: p.safe,
+        name: p.name,
       })),
       lootPiles: state.lootPiles, tutorialShown: state.tutorialShown,
     };
@@ -283,7 +540,7 @@
         data.creatures = data.zombies.map((z) => ({ id: z.id, type: "zombie", x: z.x, y: z.y, hp: z.hp, speed: z.speed }));
       }
       data.props = normalizeProps(data.props);
-      data.v = 3;
+      data.v = 4;
       return data;
     } catch (e) { return null; }
   }
@@ -294,9 +551,16 @@
     state.time = data.time || 0; state.tutorialShown = !!data.tutorialShown;
     state.props = normalizeProps(data.props);
     state.lootPiles = data.lootPiles || [];
+    state.mapId = data.mapId || "overworld";
+    state.interiors = data.interiors || {};
+    state.bank = data.bank || [];
+    state.shop = data.shop || { stock: SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s)), restockTimer: 120 };
+    // Migrate old worlds without interiors: keep overworld, interiors empty until new game
     state.creatures = (data.creatures || []).map((c) => {
       const cc = makeCreature(c.type || "zombie", c.x, c.y);
-      cc.id = c.id; cc.hp = c.hp; if (c.speed) cc.speed = c.speed; return cc;
+      cc.id = c.id; cc.hp = c.hp; if (c.speed) cc.speed = c.speed;
+      cc.mapId = c.mapId || "overworld";
+      return cc;
     });
     const p = createPlayer(data.player.x, data.player.y, data.player.skills, data.player.equip);
     Object.assign(p, {
@@ -324,6 +588,9 @@
     state.seed = (Date.now() ^ (Math.random() * 1e9)) >>> 0;
     const world = generateWorld(state.seed);
     state.props = world.props; state.creatures = world.creatures; state.lootPiles = world.lootPiles;
+    state.bank = world.bank || [];
+    state.shop = world.shop || { stock: SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s)), restockTimer: 120 };
+    state.mapId = "overworld"; state.placeMode = null;
     state.player = createPlayer(world.spawn.x, world.spawn.y);
     state.player.equip.weapon = "knife";
     syncWeaponAlias(state.player);
@@ -338,7 +605,10 @@
   // ── Base actions ──
   function claimBuilding(b) {
     if (!b || b.kind !== "building") return false;
-    if (!pointInBuilding(state.player.x, state.player.y, b)) { toast("Stand inside to claim", "bad"); return false; }
+    const insideMap = state.mapId === "int_" + b.id;
+    if (!insideMap && !pointInBuilding(state.player.x, state.player.y, b)) {
+      toast("Enter the building to claim it", "bad"); return false;
+    }
     if (b.base.claimed) { toast("Already claimed", "sys"); return false; }
     b.base.claimed = true; b.base.type = "none"; b.base.wallHp = 20; b.base.wallMax = 20;
     if (b.goblinHut) toast("Claimed a goblin hut!", "good");
@@ -411,20 +681,25 @@
   // ── Actions: gather / attack / loot ──
   function tryGather(p, prop) {
     if (p.gatherCd > 0) return;
+    if (prop.kind === "door") { tryDoor(prop); p.target = null; return; }
+    if (prop.kind === "trader") { openShop(); p.target = null; return; }
+    if (prop.kind === "furniture" && prop.fn === "bank") { openBank(); p.target = null; return; }
+    if (prop.kind === "furniture" && prop.fn === "cook") { tryCookAtFire(p); p.target = null; return; }
+    if (prop.kind === "furniture" && prop.fn === "craft") { openWorkshop("craft"); p.target = null; return; }
+    if (prop.kind === "furniture" && (prop.fn === "forge" || prop.fn === "anvil")) { openWorkshop("smith"); p.target = null; return; }
     if (prop.kind === "campfire" || prop.kind === "forge") {
-      // open craft cook/smith via workshop panel hint
       openWorkshop(prop.kind === "forge" ? "smith" : "craft");
       p.target = null;
       return;
     }
-    if (prop.kind === "building" || prop.kind === "pond") { p.target = null; return; }
-    if (prop.kind === "crate") {
+    if (prop.kind === "building" || prop.kind === "pond" || prop.kind === "wall" || prop.kind === "floor") { p.target = null; return; }
+    if (prop.kind === "crate" || prop.kind === "cupboard" || prop.kind === "fridge") {
       p.gatherCd = 0.5;
       prop.hp = 0; prop.solid = false;
       if (prop.loot) for (const it of prop.loot) invAdd(p.inv, it.id, it.qty, MAX_INV);
       floatText(prop.x, prop.y - 16, "Loot!", "#e8c860");
       gainXp(p, "fitness", 2);
-      toast("Crate looted", "good");
+      toast((prop.kind === "fridge" ? "Fridge" : prop.kind === "cupboard" ? "Cupboard" : "Crate") + " looted", "good");
       p.target = null;
       return;
     }
@@ -561,12 +836,23 @@
   }
 
   function respawnPlayer() {
+    const bed = state.props.find((p) => p.kind === "furniture" && p.fn === "respawn");
     const safe = getSafehouse();
-    const camp = state.props.find((pr) => pr.kind === "campfire");
+    const camp = state.props.find((pr) => pr.kind === "campfire" && (pr.mapId || "overworld") === "overworld");
     let sx, sy;
-    if (safe) { sx = safe.x + safe.w / 2; sy = safe.y + safe.h / 2; }
-    else if (camp) { sx = camp.x; sy = camp.y + 40; }
-    else { sx = WORLD_W / 2; sy = WORLD_H / 2; }
+    if (bed) {
+      state.mapId = bed.mapId;
+      sx = bed.x; sy = bed.y + 20;
+    } else if (safe) {
+      state.mapId = "overworld";
+      sx = safe.x + safe.w / 2; sy = safe.y + safe.h / 2;
+    } else if (camp) {
+      state.mapId = "overworld";
+      sx = camp.x; sy = camp.y + 40;
+    } else {
+      state.mapId = "overworld";
+      sx = WORLD_W / 2; sy = WORLD_H / 2;
+    }
     const skills = state.player.skills, kills = state.player.kills, maxHp = state.player.maxHp;
     state.player = createPlayer(sx, sy, skills);
     state.player.kills = kills; state.player.maxHp = maxHp;
@@ -581,13 +867,46 @@
     const d = Math.hypot(dx, dy) || 1;
     ent.facing = Math.atan2(dy, dx);
     const step = Math.min(speed * dt, d);
-    ent.x = clamp(ent.x + (dx / d) * step, 20, WORLD_W - 20);
-    ent.y = clamp(ent.y + (dy / d) * step, 20, WORLD_H - 20);
+    const sz = mapWorldSize();
+    ent.x = clamp(ent.x + (dx / d) * step, 18, sz.w - 18);
+    ent.y = clamp(ent.y + (dy / d) * step, 18, sz.h - 18);
   }
 
   function resolveSolid(ent) {
-    for (const prop of state.props) {
-      if (!prop.solid || prop.kind === "building") continue;
+    for (const prop of activeProps()) {
+      if (!prop.solid || prop.kind === "building" || prop.kind === "floor") continue;
+      if (prop.kind === "wall") {
+        // AABB push
+        const nearestX = clamp(ent.x, prop.x, prop.x + prop.w);
+        const nearestY = clamp(ent.y, prop.y, prop.y + prop.h);
+        const dx = ent.x - nearestX, dy = ent.y - nearestY;
+        const d2 = dx*dx + dy*dy;
+        if (d2 < ent.r * ent.r) {
+          if (d2 === 0) {
+            ent.y = prop.y < mapWorldSize().h / 2 ? prop.y + prop.h + ent.r : prop.y - ent.r;
+          } else {
+            const d = Math.sqrt(d2);
+            ent.x = nearestX + (dx / d) * ent.r;
+            ent.y = nearestY + (dy / d) * ent.r;
+          }
+        }
+        continue;
+      }
+      if (prop.kind === "furniture") {
+        const def = FURNITURE_DEFS[prop.furniture];
+        if (!def || def.floor) continue;
+        const rect = furnitureRect(prop.x, prop.y, def, prop.rot || 0);
+        const nearestX = clamp(ent.x, rect.x, rect.x + rect.w);
+        const nearestY = clamp(ent.y, rect.y, rect.y + rect.h);
+        const dx = ent.x - nearestX, dy = ent.y - nearestY;
+        const d2 = dx*dx + dy*dy;
+        if (d2 < ent.r * ent.r && d2 > 0) {
+          const d = Math.sqrt(d2);
+          ent.x = nearestX + (dx / d) * ent.r;
+          ent.y = nearestY + (dy / d) * ent.r;
+        }
+        continue;
+      }
       if (!prop.r) continue;
       const d = dist(ent, prop);
       const minD = ent.r + prop.r * 0.65;
@@ -620,6 +939,19 @@
       state.dayTimer -= DAY_LEN; state.day += 1;
       toast("Day " + state.day + " begins…", "sys");
       spawnNightZombies();
+    }
+    if (state.shop) {
+      state.shop.restockTimer = (state.shop.restockTimer || 0) - dt;
+      if (state.shop.restockTimer <= 0) {
+        state.shop.restockTimer = 90;
+        for (const row of state.shop.stock || []) {
+          if (row.stock < row.max) row.stock = Math.min(row.max, row.stock + 1);
+        }
+      }
+    }
+    // Rest bonus near chair/bed
+    if (activeProps().some((pr) => pr.kind === "furniture" && (pr.fn === "rest" || pr.fn === "respawn"))) {
+      if (p.hunger > 40) p.hp = Math.min(p.maxHp, p.hp + 1.5 * dt);
     }
     const p = state.player;
     if (!p.alive) return;
@@ -710,7 +1042,7 @@
 
   function updateCreatures(dt, p) {
     for (const c of state.creatures) {
-      if (!c.alive) continue;
+      if (!c.alive || !onMap(c)) continue;
       c.hitFlash = Math.max(0, c.hitFlash - dt);
       c.attackCd = Math.max(0, c.attackCd - dt);
       const d = dist(c, p);
@@ -766,6 +1098,24 @@
           }
         }
       } else wander(c, dt);
+
+      // Follow player through open doors (unclaimed or breached)
+      if (c.aggressive && state.mapId === "overworld") {
+        for (const door of state.props) {
+          if (door.kind !== "door" || !door.enter || !onMap(door)) continue;
+          if (dist(c, door) > 28) continue;
+          const b = getBuildingById(door.buildingId);
+          if (!b) continue;
+          const open = !b.base.claimed || b.base.wallHp <= 0;
+          if (!open) continue;
+          if (Math.random() < 0.02) {
+            const interior = state.interiors[door.buildingId];
+            if (!interior) continue;
+            c.mapId = interior.mapId;
+            c.x = interior.w / 2; c.y = interior.h - 50;
+          }
+        }
+      }
       resolveSolid(c);
     }
   }
@@ -808,24 +1158,30 @@
 
   function hitTestWorld(w) {
     let bestC = null, bestCd = 40;
-    for (const c of state.creatures) {
-      if (!c.alive) continue;
+    for (const c of activeCreatures()) {
       const d = Math.hypot(c.x - w.x, c.y - w.y);
       if (d < c.r + 28 && d < bestCd) { bestC = c; bestCd = d; }
     }
     let lootIdx = -1;
     for (let i = 0; i < state.lootPiles.length; i++) {
-      if (Math.hypot(state.lootPiles[i].x - w.x, state.lootPiles[i].y - w.y) < 28) { lootIdx = i; break; }
+      const pile = state.lootPiles[i];
+      if (!onMap(pile)) continue;
+      if (Math.hypot(pile.x - w.x, pile.y - w.y) < 28) { lootIdx = i; break; }
     }
     let bestP = -1, bestPd = 46;
     for (let i = 0; i < state.props.length; i++) {
       const prop = state.props[i];
-      if (prop.kind === "building" || prop.kind === "pond") continue;
+      if (!onMap(prop)) continue;
+      if (prop.kind === "building" || prop.kind === "pond" || prop.kind === "floor" || prop.kind === "wall") continue;
       if (prop.gathered) continue;
       if (prop.hp != null && prop.hp <= 0 && !prop.infinite) continue;
       const pc = propCenter(prop);
       const d = Math.hypot(pc.x - w.x, pc.y - w.y);
-      const hitR = (prop.r || 14) + 22;
+      let hitR = (prop.r || 14) + 22;
+      if (prop.kind === "furniture") {
+        const def = FURNITURE_DEFS[prop.furniture];
+        if (def) hitR = Math.max(def.w, def.h) / 2 + 12;
+      }
       if (d < hitR && d < bestPd) { bestP = i; bestPd = d; }
     }
     return { creature: bestC, lootIdx, propId: bestP, world: w };
@@ -834,17 +1190,46 @@
   function defaultTap(hit) {
     const p = state.player;
     state.tapMarkers.push({ x: hit.world.x, y: hit.world.y, life: 0.55 });
+    if (state.placeMode) {
+      placeFurnitureAt(hit.world.x, hit.world.y);
+      return;
+    }
     if (hit.creature) { p.target = { creatureId: hit.creature.id }; return; }
     if (hit.lootIdx >= 0) { p.target = { lootId: hit.lootIdx }; return; }
-    if (hit.propId >= 0) { p.target = { propId: hit.propId }; return; }
+    if (hit.propId >= 0) {
+      const prop = state.props[hit.propId];
+      if (prop && prop.kind === "door") { tryDoor(prop); return; }
+      if (prop && prop.kind === "trader") { openShop(); return; }
+      if (prop && prop.kind === "furniture" && prop.fn === "bank") { openBank(); return; }
+      if (prop && (prop.kind === "cupboard" || prop.kind === "fridge")) {
+        p.target = { propId: hit.propId }; return;
+      }
+      if (prop && prop.kind === "furniture" && prop.fn === "cook") {
+        p.target = { cook: true }; return;
+      }
+      p.target = { propId: hit.propId }; return;
+    }
+    const sz = mapWorldSize();
     p.target = {
-      x: clamp(hit.world.x, 20, WORLD_W - 20),
-      y: clamp(hit.world.y, 20, WORLD_H - 20),
+      x: clamp(hit.world.x, 20, sz.w - 20),
+      y: clamp(hit.world.y, 20, sz.h - 20),
     };
   }
 
   function buildContextActions(hit) {
     const actions = [];
+    if (hit.propId >= 0) {
+      const prop = state.props[hit.propId];
+      if (prop && prop.kind === "door") {
+        actions.push({ id: "door", label: prop.exit ? "Exit building" : "Enter building" });
+      }
+      if (prop && prop.kind === "trader") actions.push({ id: "shop", label: "Trade with " + (prop.name || "trader") });
+      if (prop && prop.kind === "furniture" && prop.fn === "bank") actions.push({ id: "bank", label: "Open bank" });
+      if (prop && prop.kind === "furniture" && prop.placed) {
+        actions.push({ id: "furn_rotate", label: "Rotate furniture" });
+        actions.push({ id: "furn_pickup", label: "Pick up furniture" });
+      }
+    }
     if (hit.creature) {
       const def = CREATURE_DEFS[hit.creature.type];
       actions.push({ id: "attack", label: "Attack " + def.name });
@@ -889,11 +1274,17 @@
     else if ((actionId === "gather" || actionId === "loot_crate") && hit.propId >= 0) p.target = { propId: hit.propId };
     else if (actionId === "cook") p.target = { cook: true };
     else if (actionId === "smith") openWorkshop("smith");
+    else if (actionId === "door" && hit.propId >= 0) tryDoor(state.props[hit.propId]);
+    else if (actionId === "shop") openShop();
+    else if (actionId === "bank") openBank();
+    else if (actionId === "furn_rotate" && hit.propId >= 0) rotateFurniture(state.props[hit.propId]);
+    else if (actionId === "furn_pickup" && hit.propId >= 0) pickupFurniture(state.props[hit.propId]);
     else if (actionId === "claim") {
       const b = buildingAt(hit.world.x, hit.world.y);
       if (b) { claimBuilding(b); renderWorkshop(); }
     } else if (actionId === "walk") {
-      p.target = { x: clamp(hit.world.x, 20, WORLD_W - 20), y: clamp(hit.world.y, 20, WORLD_H - 20) };
+      const sz = mapWorldSize();
+      p.target = { x: clamp(hit.world.x, 20, sz.w - 20), y: clamp(hit.world.y, 20, sz.h - 20) };
     } else if (actionId.startsWith("examine")) {
       examineHit(hit, actionId);
     }
@@ -1037,8 +1428,9 @@
     const vw = state.viewW, vh = state.viewH;
     if (!state.player) { ctx.fillStyle = "#3a5a28"; ctx.fillRect(0, 0, vw, vh); return; }
     const p = state.player;
-    state.cam.x = clamp(p.x - vw / 2, 0, Math.max(0, WORLD_W - vw));
-    state.cam.y = clamp(p.y - vh / 2, 0, Math.max(0, WORLD_H - vh));
+    const sz = mapWorldSize();
+    state.cam.x = clamp(p.x - vw / 2, 0, Math.max(0, sz.w - vw));
+    state.cam.y = clamp(p.y - vh / 2, 0, Math.max(0, sz.h - vh));
     const cam = state.cam, light = dayFactor();
 
     const t0x = Math.floor(cam.x / TILE) - 1, t0y = Math.floor(cam.y / TILE) - 1;
@@ -1056,16 +1448,15 @@
       }
     }
 
-    for (const prop of state.props) drawProp(prop, cam, light, vw, vh);
-    for (const pile of state.lootPiles) {
+    for (const prop of activeProps()) drawProp(prop, cam, light, vw, vh);
+    for (const pile of activeLoot()) {
       const sx = pile.x - cam.x, sy = pile.y - cam.y;
       if (sx < -20 || sy < -20 || sx > vw + 20 || sy > vh + 20) continue;
       ctx.fillStyle = pile.deathDrop ? "#e8c860" : "#c9a05a";
       ctx.fillRect(sx - 9, sy - 7, 18, 14);
       ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.strokeRect(sx - 9, sy - 7, 18, 14);
     }
-    for (const c of state.creatures) {
-      if (!c.alive) continue;
+    for (const c of activeCreatures()) {
       const sx = c.x - cam.x, sy = c.y - cam.y;
       if (sx < -30 || sy < -30 || sx > vw + 30 || sy > vh + 30) continue;
       drawCreature(sx, sy, c);
@@ -1103,6 +1494,20 @@
       g.addColorStop(1, `rgba(10,6,2,${(1-light)*0.55})`);
       ctx.fillStyle = g; ctx.fillRect(0, 0, vw, vh);
     }
+    if (state.mapId !== "overworld") {
+      ctx.fillStyle = "rgba(20,14,6,0.75)";
+      ctx.fillRect(8, 8, 160, 28);
+      ctx.strokeStyle = "#8a6a38"; ctx.strokeRect(8, 8, 160, 28);
+      ctx.fillStyle = "#e8c860"; ctx.font = "bold 12px Georgia"; ctx.textAlign = "left";
+      ctx.fillText("Interior — tap EXIT door", 16, 27);
+    }
+    if (state.placeMode) {
+      ctx.fillStyle = "rgba(20,14,6,0.8)";
+      ctx.fillRect(8, vh - 40, 220, 32);
+      ctx.fillStyle = "#e8c860"; ctx.font = "bold 12px Georgia"; ctx.textAlign = "left";
+      const nm = (FURNITURE_DEFS[state.placeMode.type] || {}).name || state.placeMode.type;
+      ctx.fillText("Placing: " + nm + " (tap floor)", 16, vh - 20);
+    }
     drawMinimap();
   }
 
@@ -1136,6 +1541,60 @@
     if (prop.kind === "pond") {
       ctx.fillStyle = "#2a5a7a"; ctx.fillRect(sx, sy, prop.w, prop.h);
       ctx.strokeStyle = "#1a1208"; ctx.strokeRect(sx, sy, prop.w, prop.h);
+      return;
+    }
+    if (prop.kind === "floor") {
+      // tiled interior floor
+      for (let yy = 0; yy < prop.h; yy += TILE) {
+        for (let xx = 0; xx < prop.w; xx += TILE) {
+          const odd = ((xx + yy) / TILE) % 2 === 0;
+          ctx.fillStyle = odd ? "#5a4a38" : "#4a3a2a";
+          ctx.fillRect(sx + xx, sy + yy, TILE, TILE);
+        }
+      }
+      return;
+    }
+    if (prop.kind === "wall") {
+      ctx.fillStyle = "#3a3228";
+      ctx.fillRect(sx, sy, prop.w, prop.h);
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 1; ctx.strokeRect(sx, sy, prop.w, prop.h);
+      return;
+    }
+    if (prop.kind === "door") {
+      ctx.fillStyle = "#8a6a30";
+      ctx.fillRect(sx - 14, sy - 10, 28, 20);
+      ctx.strokeStyle = "#e8c860"; ctx.lineWidth = 2; ctx.strokeRect(sx - 14, sy - 10, 28, 20);
+      ctx.fillStyle = "#e8c860"; ctx.font = "bold 9px Georgia"; ctx.textAlign = "center";
+      ctx.fillText(prop.exit ? "EXIT" : "ENTER", sx, sy + 4);
+      return;
+    }
+    if (prop.kind === "cupboard" || prop.kind === "fridge") {
+      ctx.fillStyle = prop.kind === "fridge" ? "#8090a0" : "#6a4a28";
+      ctx.fillRect(sx - 12, sy - 16, 24, 32);
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.strokeRect(sx - 12, sy - 16, 24, 32);
+      return;
+    }
+    if (prop.kind === "trader") {
+      ctx.fillStyle = "#4a6a8a";
+      ctx.beginPath(); ctx.arc(sx, sy, 13, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = "#d2b48c"; ctx.beginPath(); ctx.arc(sx, sy - 10, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#e8c860"; ctx.font = "bold 9px Georgia"; ctx.textAlign = "center";
+      ctx.fillText("SHOP", sx, sy + 24);
+      return;
+    }
+    if (prop.kind === "furniture") {
+      const def = FURNITURE_DEFS[prop.furniture] || { w: 20, h: 20, color: "#888", name: "?" };
+      const rect = furnitureRect(prop.x, prop.y, def, prop.rot || 0);
+      const fx = rect.x - cam.x, fy = rect.y - cam.y;
+      ctx.fillStyle = def.color || "#888";
+      ctx.fillRect(fx, fy, rect.w, rect.h);
+      ctx.strokeStyle = "#1a1208"; ctx.lineWidth = 2; ctx.strokeRect(fx, fy, rect.w, rect.h);
+      if (prop.fn === "light") {
+        const g = ctx.createRadialGradient(sx, sy, 4, sx, sy, 50);
+        g.addColorStop(0, "rgba(255,200,80,0.25)"); g.addColorStop(1, "rgba(255,200,80,0)");
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, 50, 0, Math.PI * 2); ctx.fill();
+      }
       return;
     }
     if (prop.kind === "campfire") {
@@ -1258,19 +1717,22 @@
   }
 
   function drawMinimap() {
-    const s = 76 / Math.max(WORLD_W, WORLD_H);
     mctx.clearRect(0, 0, 76, 76);
     mctx.fillStyle = "rgba(30,45,25,0.95)"; mctx.fillRect(0, 0, 76, 76);
-    for (const prop of state.props) {
+    const sz = mapWorldSize();
+    const s = 76 / Math.max(sz.w, sz.h);
+    for (const prop of activeProps()) {
       if (prop.kind === "building") {
         mctx.fillStyle = (prop.base && prop.base.claimed) ? "#e8c860" : "#6a5438";
         mctx.fillRect(prop.x * s, prop.y * s, Math.max(2, prop.w * s), Math.max(2, prop.h * s));
-      } else if (prop.kind === "campfire") {
+      } else if (prop.kind === "campfire" || prop.kind === "door") {
         mctx.fillStyle = "#e08020"; mctx.fillRect(prop.x * s - 1, prop.y * s - 1, 3, 3);
+      } else if (prop.kind === "wall") {
+        mctx.fillStyle = "#3a3228";
+        mctx.fillRect(prop.x * s, prop.y * s, Math.max(1, prop.w * s), Math.max(1, prop.h * s));
       }
     }
-    for (const c of state.creatures) {
-      if (!c.alive) continue;
+    for (const c of activeCreatures()) {
       mctx.fillStyle = c.type === "goblin" ? "#80c040" : c.aggressive ? "#c04040" : "#e0c080";
       mctx.fillRect(c.x * s - 0.5, c.y * s - 0.5, 2, 2);
     }
@@ -1409,6 +1871,28 @@
     if (base.type === "workshop") {
       html += '<p class="hint">Workshop includes forge + anvil for the Smith tab.</p>';
     }
+    // Furniture when inside this building's interior
+    const bid = b.id;
+    const insideHere = state.mapId === "int_" + bid;
+    if (insideHere) {
+      html += '<p class="hint">Furniture (tap item, then tap a floor tile):</p><div class="craft-list">';
+      for (const [key, def] of Object.entries(FURNITURE_DEFS)) {
+        const mats = Object.entries(def.cost).map(([id, q]) => {
+          const have = invCount(p.inv, id);
+          return '<span class="' + (have>=q?"mat-ok":"mat-bad") + '">' + ITEM_DEFS[id].name + " " + have + "/" + q + "</span>";
+        }).join(" · ");
+        const can = p.skills.construction.level >= def.skill && canAfford(p.inv, def.cost);
+        const active = state.placeMode && state.placeMode.type === key;
+        html += '<button type="button" class="craft-row ' + (can?"":"disabled") + (active?" selected-place":"") + '" data-furn="' + key + '">' +
+          '<div class="craft-main"><strong>' + def.name + '</strong> <span class="lvl">Con ' + def.skill + '+</span><div class="mats">' + mats + '</div></div>' +
+          '<span class="craft-go">' + (active ? "Selected" : "Place") + '</span></button>';
+      }
+      html += '</div>';
+      if (state.placeMode) html += '<button type="button" class="btn btn-block" id="btn-cancel-place">Cancel placement</button>';
+      html += '<p class="hint">Long-press placed furniture to rotate or pick up.</p>';
+    } else {
+      html += '<p class="hint">Enter the building (tap ENTER door) to place furniture inside.</p>';
+    }
     body.innerHTML = html;
     body.querySelectorAll("[data-type]").forEach((btn) => {
       btn.onclick = (e) => { e.stopPropagation(); setBuildingType(b, btn.dataset.type); renderWorkshop(); updateHud(); };
@@ -1416,6 +1900,17 @@
     body.querySelectorAll("[data-fort]").forEach((btn) => {
       btn.onclick = (e) => { e.stopPropagation(); doFortify(b, btn.dataset.fort); renderWorkshop(); updateHud(); };
     });
+    body.querySelectorAll("[data-furn]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        if (btn.classList.contains("disabled")) return;
+        state.placeMode = { type: btn.dataset.furn, rot: 0 };
+        closeOverlays();
+        toast("Tap a floor tile to place " + FURNITURE_DEFS[btn.dataset.furn].name, "sys");
+      };
+    });
+    const cancel = document.getElementById("btn-cancel-place");
+    if (cancel) cancel.onclick = (e) => { e.stopPropagation(); state.placeMode = null; renderWorkshop(); };
   }
 
   function renderEquipTab(body, status) {
@@ -1561,6 +2056,141 @@
   }
 
 
+
+  function openBank() {
+    state.selectedBank = -1;
+    renderBank();
+    openOverlay("overlay-bank");
+  }
+  function renderBank() {
+    const p = state.player;
+    const status = document.getElementById("bank-status");
+    const grid = document.getElementById("bank-grid");
+    const invg = document.getElementById("bank-inv-grid");
+    if (!status) return;
+    status.textContent = "Bank is shared across all bank chests. Survives death. Coins: " + getCoins(p);
+    grid.innerHTML = (state.bank.length ? state.bank : []).map((it, i) => {
+      const def = ITEM_DEFS[it.id] || { name: it.id };
+      const sel = state.selectedBank === i ? " selected" : "";
+      return '<button type="button" class="inv-item' + sel + '" data-bank="' + i + '"><span class="name">' + def.name + " ×" + it.qty + '</span><span class="meta">In bank</span></button>';
+    }).join("") || "<p>Bank empty.</p>";
+    invg.innerHTML = p.inv.map((it, i) => {
+      const def = ITEM_DEFS[it.id] || { name: it.id };
+      return '<button type="button" class="inv-item" data-depid="' + it.id + '"><span class="name">' + def.name + " ×" + it.qty + '</span><span class="meta">Bag</span></button>';
+    }).join("") || "<p>Bag empty.</p>";
+    grid.querySelectorAll("[data-bank]").forEach((btn) => {
+      let press = null;
+      const withdraw = (qty) => {
+        const it = state.bank[+btn.dataset.bank];
+        if (!it) return;
+        const took = bankWithdraw(state.bank, p.inv, it.id, qty, MAX_INV);
+        toast(took ? ("Withdrew " + took + " " + ITEM_DEFS[it.id].name) : "Can't withdraw", took ? "good" : "bad");
+        renderBank(); updateHud(); saveGame(true);
+      };
+      btn.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        press = setTimeout(() => { press = "long"; showQtySheet("Withdraw", (q) => withdraw(q === "all" ? 9999 : q)); }, 450);
+      });
+      btn.addEventListener("pointerup", (e) => {
+        e.stopPropagation();
+        if (press === "long") { press = null; return; }
+        if (typeof press === "number") { clearTimeout(press); withdraw(1); }
+        press = null;
+      });
+      btn.addEventListener("click", (e) => e.stopPropagation());
+    });
+    invg.querySelectorAll("[data-depid]").forEach((btn) => {
+      let press = null;
+      const deposit = (qty) => {
+        const id = btn.dataset.depid;
+        for (const slot of EQUIP_SLOTS) if (p.equip[slot] === id) p.equip[slot] = null;
+        syncWeaponAlias(p);
+        const took = bankDeposit(state.bank, p.inv, id, qty);
+        toast(took ? ("Deposited " + took) : "Nothing deposited", took ? "good" : "bad");
+        renderBank(); updateHud(); saveGame(true);
+      };
+      btn.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        press = setTimeout(() => { press = "long"; showQtySheet("Deposit", (q) => deposit(q === "all" ? 9999 : q)); }, 450);
+      });
+      btn.addEventListener("pointerup", (e) => {
+        e.stopPropagation();
+        if (press === "long") { press = null; return; }
+        if (typeof press === "number") { clearTimeout(press); deposit(1); }
+        press = null;
+      });
+    });
+  }
+  function showQtySheet(title, cb) {
+    const sheet = document.getElementById("qty-sheet");
+    if (!sheet) { cb(5); return; }
+    document.getElementById("qty-title").textContent = title;
+    sheet.classList.add("open");
+    sheet.querySelectorAll("[data-qty]").forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        sheet.classList.remove("open");
+        const v = b.dataset.qty;
+        cb(v === "all" ? "all" : +v);
+      };
+    });
+  }
+
+  function openShop() {
+    renderShop();
+    openOverlay("overlay-shop");
+  }
+  function renderShop() {
+    const p = state.player;
+    const status = document.getElementById("shop-status");
+    const buy = document.getElementById("shop-buy");
+    const sell = document.getElementById("shop-sell");
+    if (!status) return;
+    if (!state.shop || !state.shop.stock) {
+      state.shop = { stock: SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s)), restockTimer: 90 };
+    }
+    status.textContent = "Mira the Trader — Your coins: " + getCoins(p);
+    buy.innerHTML = state.shop.stock.map((row, i) => {
+      const def = ITEM_DEFS[row.id];
+      const can = getCoins(p) >= row.buy && row.stock > 0;
+      return '<button type="button" class="craft-row ' + (can?"":"disabled") + '" data-buy="' + i + '">' +
+        '<div class="craft-main"><strong>' + def.name + '</strong><div class="mats">Buy ' + row.buy + 'c · Stock ' + row.stock + '/' + row.max + '</div></div>' +
+        '<span class="craft-go">Buy</span></button>';
+    }).join("");
+    sell.innerHTML = p.inv.filter((it) => it.id !== "coins").map((it) => {
+      const row = state.shop.stock.find((s) => s.id === it.id);
+      const price = row ? row.sell : 2;
+      return '<button type="button" class="craft-row" data-sell="' + it.id + '">' +
+        '<div class="craft-main"><strong>' + ITEM_DEFS[it.id].name + ' ×' + it.qty + '</strong><div class="mats">Sell ' + price + 'c each</div></div>' +
+        '<span class="craft-go">Sell</span></button>';
+    }).join("") || "<p>Nothing to sell.</p>";
+    buy.querySelectorAll("[data-buy]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const row = state.shop.stock[+btn.dataset.buy];
+        const coins = getCoins(p);
+        const res = shopBuy(row, p.inv, coins);
+        if (res.ok) { setCoins(p, res.coins); toast(res.msg, "good"); }
+        else toast(res.msg, "bad");
+        renderShop(); updateHud(); saveGame(true);
+      };
+    });
+    sell.querySelectorAll("[data-sell]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.sell;
+        const row = state.shop.stock.find((s) => s.id === id) || { sell: 2, stock: 0, max: 99, id };
+        // unequip
+        for (const slot of EQUIP_SLOTS) if (p.equip[slot] === id) p.equip[slot] = null;
+        syncWeaponAlias(p);
+        const res = shopSell(row, p.inv, id, getCoins(p));
+        if (res.ok) { setCoins(p, res.coins); toast(res.msg, "good"); }
+        else toast(res.msg, "bad");
+        renderShop(); updateHud(); saveGame(true);
+      };
+    });
+  }
+
   // ── Boot ──
   let last = performance.now();
   function frame(now) {
@@ -1611,6 +2241,27 @@
   document.getElementById("btn-drop").addEventListener("click", dropSelected);
   document.getElementById("btn-skills").addEventListener("click", () => openWorkshop(state.workshopTab || "craft"));
   document.getElementById("btn-close-workshop").addEventListener("click", closeOverlays);
+  const btnBankClose = document.getElementById("btn-close-bank");
+  if (btnBankClose) btnBankClose.addEventListener("click", closeOverlays);
+  const btnShopClose = document.getElementById("btn-close-shop");
+  if (btnShopClose) btnShopClose.addEventListener("click", closeOverlays);
+  const btnDepAll = document.getElementById("btn-bank-deposit-all");
+  if (btnDepAll) btnDepAll.addEventListener("click", () => {
+    const p = state.player;
+    const keep = [];
+    for (const it of p.inv.slice()) {
+      const d = ITEM_DEFS[it.id];
+      if (!d || it.id === "coins" || d.type === "weapon" || d.type === "armor" || d.type === "tool") {
+        keep.push(it); continue;
+      }
+      for (const slot of EQUIP_SLOTS) if (p.equip[slot] === it.id) p.equip[slot] = null;
+      invAdd(state.bank, it.id, it.qty, 60);
+    }
+    p.inv = keep;
+    syncWeaponAlias(p);
+    toast("Deposited inventory to bank", "good");
+    renderBank(); updateHud(); saveGame(true);
+  });
   document.querySelectorAll(".ws-tab").forEach((tab) => {
     tab.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1641,10 +2292,13 @@
 
   window.AshenVale = {
     state, D, ITEM_DEFS, RECIPES, FORTIFY, BUILDING_TYPES, CREATURE_DEFS, NODE_DEFS,
+    FURNITURE_DEFS, SHOP_STOCK_DEFAULT,
     invAdd, invRemove, invCount, canAfford, payNeed, xpToNext, gainXp,
     createPlayer, generateWorld, serialize, clientToWorld, migrateSkills,
     emptyEquip, armorTotal, reduceDamage, meleeDamage, rangedDamage, consumeAmmo,
     cookOutcome, recipeBlocked, doCraft, bestToolTier, defaultBase, pointInBuilding,
+    enterBuilding, exitBuilding, placeFurnitureAt, furnitureFits, furnitureRect, rectsOverlap,
+    bankDeposit, bankWithdraw, shopBuy, shopSell, getCoins, setCoins,
     SAVE_KEY, SAVE_KEY_LEGACY, SKILL_NAMES, WORLD_W, WORLD_H, EQUIP_SLOTS,
   };
 

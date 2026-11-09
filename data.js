@@ -5,8 +5,8 @@
 (function (global) {
   "use strict";
 
-  const SAVE_KEY = "ashenvale_save_v3";
-  const SAVE_KEY_LEGACY = ["ashenvale_save_v2", "ashenvale_save_v1"];
+  const SAVE_KEY = "ashenvale_save_v4";
+  const SAVE_KEY_LEGACY = ["ashenvale_save_v3", "ashenvale_save_v2", "ashenvale_save_v1"];
 
   const SKILL_NAMES = [
     "combat", "ranged", "woodcutting", "mining", "fishing", "cooking",
@@ -127,6 +127,95 @@
     { id: "iron_helm", out: { id: "iron_helm", qty: 1 }, need: { iron_bar: 2 }, skill: "smithing", level: 4, xp: 35, tab: "smith", anvil: true },
     { id: "iron_body", out: { id: "iron_body", qty: 1 }, need: { iron_bar: 4 }, skill: "smithing", level: 6, xp: 60, tab: "smith", anvil: true },
   ];
+
+
+  const FURNITURE_DEFS = {
+    bed: { name: "Bed", w: 36, h: 24, cost: { plank: 4, cloth: 2 }, skill: 2, xp: 30, fn: "respawn", color: "#8a5a40" },
+    workbench: { name: "Workbench", w: 40, h: 24, cost: { plank: 5, nails: 4 }, skill: 2, xp: 28, fn: "craft", color: "#6a4a28" },
+    forge: { name: "Forge", w: 36, h: 28, cost: { scrap: 6, stone: 4, iron_bar: 1 }, skill: 4, xp: 45, fn: "forge", color: "#4a3a30" },
+    anvil: { name: "Anvil", w: 28, h: 20, cost: { iron_bar: 3 }, skill: 3, xp: 35, fn: "anvil", color: "#6a7078" },
+    stove: { name: "Stove", w: 28, h: 24, cost: { scrap: 4, plank: 2 }, skill: 3, xp: 32, fn: "cook", color: "#5a5050" },
+    chest: { name: "Storage chest", w: 28, h: 22, cost: { plank: 3, nails: 2 }, skill: 1, xp: 18, fn: "storage", color: "#8a6a30" },
+    bank_chest: { name: "Bank chest", w: 30, h: 24, cost: { plank: 4, iron_bar: 1, nails: 4 }, skill: 5, xp: 50, fn: "bank", color: "#c9a05a" },
+    table: { name: "Table", w: 40, h: 28, cost: { plank: 3 }, skill: 1, xp: 12, fn: null, color: "#7a5a30" },
+    chair: { name: "Chair", w: 18, h: 18, cost: { plank: 1 }, skill: 1, xp: 8, fn: "rest", color: "#6a4a28" },
+    rug: { name: "Rug", w: 48, h: 32, cost: { cloth: 3 }, skill: 1, xp: 10, fn: null, color: "#8a3030", floor: true },
+    lamp: { name: "Lamp", w: 14, h: 18, cost: { scrap: 1, stick: 1 }, skill: 1, xp: 10, fn: "light", color: "#e8c860" },
+    torch: { name: "Wall torch", w: 12, h: 16, cost: { stick: 1, cloth: 1 }, skill: 1, xp: 8, fn: "light", color: "#e08020", wall: true },
+    decor: { name: "Wall decor", w: 20, h: 16, cost: { cloth: 1, stick: 1 }, skill: 1, xp: 6, fn: null, color: "#a08050", wall: true },
+  };
+
+  // stone as mat alias via scrap piles — add stone item
+  // (ITEM_DEFS patched below)
+
+  const SHOP_STOCK_DEFAULT = [
+    { id: "bronze_axe", buy: 40, sell: 12, stock: 3, max: 3 },
+    { id: "bronze_pick", buy: 40, sell: 12, stock: 3, max: 3 },
+    { id: "bandage", buy: 15, sell: 4, stock: 8, max: 8 },
+    { id: "canned", buy: 20, sell: 6, stock: 6, max: 6 },
+    { id: "water", buy: 8, sell: 2, stock: 10, max: 10 },
+    { id: "bronze_arrows", buy: 25, sell: 8, stock: 5, max: 5 },
+    { id: "plank", buy: 6, sell: 2, stock: 20, max: 20 },
+    { id: "nails", buy: 5, sell: 1, stock: 30, max: 30 },
+    { id: "string", buy: 10, sell: 3, stock: 8, max: 8 },
+    { id: "hoodie", buy: 55, sell: 18, stock: 1, max: 1 },
+  ];
+
+  function furnitureFits(x, y, def, rot, room) {
+    const w = rot % 2 === 1 ? def.h : def.w;
+    const h = rot % 2 === 1 ? def.w : def.h;
+    const margin = 16; // wall thickness
+    if (x - w/2 < margin || y - h/2 < margin) return false;
+    if (x + w/2 > room.w - margin || y + h/2 > room.h - margin) return false;
+    return true;
+  }
+
+  function furnitureRect(x, y, def, rot) {
+    const w = rot % 2 === 1 ? def.h : def.w;
+    const h = rot % 2 === 1 ? def.w : def.h;
+    return { x: x - w/2, y: y - h/2, w, h };
+  }
+
+  function rectsOverlap(a, b, pad) {
+    pad = pad || 0;
+    return !(a.x + a.w + pad <= b.x || b.x + b.w + pad <= a.x || a.y + a.h + pad <= b.y || b.y + b.h + pad <= a.y);
+  }
+
+  function bankDeposit(bank, inv, id, qty) {
+    qty = Math.min(qty, invCount(inv, id));
+    if (qty <= 0) return 0;
+    invRemove(inv, id, qty);
+    invAdd(bank, id, qty, 60);
+    return qty;
+  }
+
+  function bankWithdraw(bank, inv, id, qty, maxSlots) {
+    qty = Math.min(qty, invCount(bank, id));
+    if (qty <= 0) return 0;
+    const before = invCount(inv, id);
+    invAdd(inv, id, qty, maxSlots == null ? 24 : maxSlots);
+    const took = invCount(inv, id) - before;
+    if (took > 0) invRemove(bank, id, took);
+    return took;
+  }
+
+  function shopBuy(stockRow, inv, coinsBefore) {
+    if (!stockRow || stockRow.stock <= 0) return { ok: false, msg: "Out of stock", coins: coinsBefore };
+    if (coinsBefore < stockRow.buy) return { ok: false, msg: "Not enough coins", coins: coinsBefore };
+    if (!invAdd(inv, stockRow.id, 1, 24)) return { ok: false, msg: "Bag full", coins: coinsBefore };
+    stockRow.stock -= 1;
+    return { ok: true, msg: "Bought " + (ITEM_DEFS[stockRow.id] || {}).name, coins: coinsBefore - stockRow.buy };
+  }
+
+  function shopSell(stockRow, inv, id, coinsBefore) {
+    if (invCount(inv, id) <= 0) return { ok: false, msg: "You don't have that", coins: coinsBefore };
+    const price = stockRow ? stockRow.sell : Math.max(1, Math.floor(((ITEM_DEFS[id] || {}).buy || 5) * 0.3));
+    // If not in shop list, allow sell at scrap value
+    const sellPrice = stockRow ? stockRow.sell : 2;
+    invRemove(inv, id, 1);
+    if (stockRow && stockRow.stock < stockRow.max) stockRow.stock += 1;
+    return { ok: true, msg: "Sold for " + sellPrice + " coins", coins: coinsBefore + sellPrice, gained: sellPrice };
+  }
 
   const NODE_DEFS = {
     tree: { skill: "woodcutting", tool: "axe", tier: 1, drops: [{ id: "wood", qty: [1, 2] }], xp: 12, label: "Tree", verb: "Chop" },
@@ -319,9 +408,12 @@
   global.AshenData = {
     SAVE_KEY, SAVE_KEY_LEGACY, SKILL_NAMES, SKILL_LABELS, EQUIP_SLOTS,
     BUILDING_TYPES, FORTIFY, ITEM_DEFS, RECIPES, NODE_DEFS, CREATURE_DEFS,
+    FURNITURE_DEFS, SHOP_STOCK_DEFAULT,
     xpToNext, emptySkills, migrateSkills, emptyEquip,
     invCount, invAdd, invRemove, canAfford, payNeed,
     bestToolTier, armorTotal, reduceDamage, meleeDamage, rangedDamage,
     consumeAmmo, cookOutcome, clientToWorld, defaultBase,
+    furnitureFits, furnitureRect, rectsOverlap, bankDeposit, bankWithdraw,
+    shopBuy, shopSell,
   };
 })(typeof window !== "undefined" ? window : globalThis);

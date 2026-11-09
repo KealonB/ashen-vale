@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#1a1208" />
   <meta name="description" content="Ashen Vale — skill-based zombie survival with crafting, smithing, and bases." />
   <title>Ashen Vale</title>
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=4" />
 </head>
 <body>
   <div id="app">
@@ -94,7 +94,9 @@
           <li><strong>Tools:</strong> bronze/iron/steel axe &amp; pickaxe gate trees and rocks.</li>
           <li><strong>Combat:</strong> swords melee; shortbow + arrows for Ranged. Armor reduces damage.</li>
           <li><strong>Creatures:</strong> zombies, rats, goblins (hostile); squirrels &amp; chickens flee.</li>
-          <li><strong>Death:</strong> skills kept; gear drops. Storage stash persists.</li>
+          <li><strong>Buildings:</strong> tap ENTER door for interiors; claim &amp; furnish (bed, forge, bank chest…).</li>
+          <li><strong>Bank / Shop:</strong> public bank north of camp; Mira the Trader sells gear for coins.</li>
+          <li><strong>Death:</strong> skills kept; gear drops. Bank contents persist.</li>
         </ul>
         <p>Original homage — not affiliated with Jagex or The Indie Stone.</p>
         <div class="panel-actions">
@@ -115,12 +117,54 @@
       </div>
     </div>
 
+
+    <div class="overlay" id="overlay-bank">
+      <div class="panel panel-tall">
+        <h2>Bank</h2>
+        <p id="bank-status" class="ws-status">Shared storage — survives death.</p>
+        <p class="hint">Tap = 1 · Long-press = choose 5 / 10 / All</p>
+        <h3 class="subhead">Bank vault</h3>
+        <div class="inv-grid" id="bank-grid"></div>
+        <h3 class="subhead">Your bag</h3>
+        <div class="inv-grid" id="bank-inv-grid"></div>
+        <div class="panel-actions">
+          <button class="btn" id="btn-bank-deposit-all" type="button">Deposit all mats</button>
+          <button class="btn primary" id="btn-close-bank" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay" id="overlay-shop">
+      <div class="panel panel-tall">
+        <h2>General Store</h2>
+        <p id="shop-status" class="ws-status">Buy and sell with coins.</p>
+        <h3 class="subhead">Buy</h3>
+        <div class="craft-list" id="shop-buy"></div>
+        <h3 class="subhead">Sell</h3>
+        <div class="craft-list" id="shop-sell"></div>
+        <div class="panel-actions">
+          <button class="btn primary" id="btn-close-shop" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="qty-sheet" class="overlay">
+      <div class="panel" style="max-width:320px">
+        <h2 id="qty-title">Quantity</h2>
+        <div class="panel-actions" style="flex-direction:column">
+          <button class="btn" type="button" data-qty="5">5</button>
+          <button class="btn" type="button" data-qty="10">10</button>
+          <button class="btn primary" type="button" data-qty="all">All</button>
+          <button class="btn" type="button" data-qty="1">Cancel / 1</button>
+        </div>
+      </div>
+    </div>
     <div id="context-menu" aria-hidden="true">
       <div id="context-list"></div>
       <button type="button" class="ctx-item ctx-cancel" id="context-dismiss">Cancel</button>
     </div>
   </div>
-  <script src="data.js?v=3"></script>
-  <script src="game.js?v=3"></script>
+  <script src="data.js?v=4"></script>
+  <script src="game.js?v=4"></script>
 </body>
 </html>

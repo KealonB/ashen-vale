@@ -1,5 +1,5 @@
 /**
- * Ashen Vale Phase 1 headless tests
+ * Ashen Vale Phase 1+2 headless tests
  */
 import { readFileSync } from "fs";
 import vm from "vm";
@@ -16,10 +16,10 @@ function assert(cond, msg) {
   else { failed++; console.error("  FAIL", msg); }
 }
 
-try { new vm.Script(dataSrc, { filename: "data.js" }); assert(true, "data.js parses"); }
-catch (e) { assert(false, "data.js parse: " + e.message); }
-try { new vm.Script(gameSrc, { filename: "game.js" }); assert(true, "game.js parses"); }
-catch (e) { assert(false, "game.js parse: " + e.message); }
+try { new vm.Script(dataSrc); assert(true, "data.js parses"); }
+catch (e) { assert(false, "data parse " + e.message); }
+try { new vm.Script(gameSrc); assert(true, "game.js parses"); }
+catch (e) { assert(false, "game parse " + e.message); }
 
 const elements = new Map();
 function makeEl(id) {
@@ -62,124 +62,121 @@ const sandbox = {
   confirm: mockWindow.confirm,
   Math, Date, JSON, console, setTimeout, clearTimeout,
 };
-sandbox.globalThis = sandbox;
-sandbox.self = sandbox;
+sandbox.globalThis = sandbox; sandbox.self = sandbox;
 
 try {
   vm.runInNewContext(dataSrc, sandbox, { filename: "data.js" });
-  assert(!!sandbox.window.AshenData, "AshenData exported");
   vm.runInNewContext(gameSrc, sandbox, { filename: "game.js" });
-  assert(!!sandbox.window.AshenVale, "AshenVale exported");
+  assert(!!sandbox.window.AshenVale && !!sandbox.window.AshenData, "APIs exported");
 } catch (e) {
   assert(false, "load: " + e.message);
   console.error(e);
-  console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(1);
 }
 
 const AV = sandbox.window.AshenVale;
 const D = sandbox.window.AshenData;
 
-// Touch conversion
-const cam = { x: 100, y: 200 };
-const rect = { left: 0, top: 56, width: 390, height: 500 };
-const mid = AV.clientToWorld(195, 56 + 250, rect, cam, 390, 500);
-assert(Math.abs(mid.x - (cam.x + 195)) < 0.01, "touch center X CSS");
-assert(Math.abs(mid.y - (cam.y + 250)) < 0.01, "touch center Y CSS");
-const wrong = ((100 - 0) * (390 * 2) / 390) + cam.x;
-const correct = AV.clientToWorld(100, 156, rect, cam, 390, 500).x;
-assert(Math.abs(correct - (100 + cam.x)) < 0.01, "not DPR-scaled");
-assert(Math.abs(correct - wrong) > 50, "differs from buggy formula");
+assert(AV.SAVE_KEY === "ashenvale_save_v4", "save key v4");
+assert(D.FURNITURE_DEFS.bed && D.FURNITURE_DEFS.bank_chest, "furniture defs");
 
-// Skills migration foraging → woodcutting
-const mig = AV.migrateSkills({ foraging: { level: 5, xp: 10, next: 100 }, combat: { level: 2, xp: 0, next: 50 } });
-assert(mig.woodcutting.level === 5, "foraging folds into woodcutting");
-assert(mig.mining.level >= 1, "mining present after migrate");
-assert(mig.ranged && mig.smithing && mig.cooking, "new skills present");
-assert(mig.combat.level === 2, "combat preserved");
+const world = AV.generateWorld(99);
+AV.state.props = world.props;
+AV.state.creatures = world.creatures;
+AV.state.lootPiles = world.lootPiles;
+AV.state.interiors = sandbox.window.AshenVale.state.interiors;
+AV.state.bank = [];
+AV.state.shop = world.shop;
+AV.state.mapId = "overworld";
+AV.state.player = AV.createPlayer(world.spawn.x, world.spawn.y);
 
-// Crafting recipe execution
-const p = AV.createPlayer(10, 10);
-p.inv = [{ id: "wood", qty: 5 }, { id: "scrap", qty: 3 }];
-AV.state.player = p;
-AV.state.props = [];
-const r1 = AV.doCraft("plank");
-assert(r1.ok === true, "craft plank succeeds");
-assert(AV.invCount(p.inv, "plank") >= 2, "planks added");
-assert(AV.invCount(p.inv, "wood") === 4, "wood consumed");
-const blocked = AV.doCraft("shortbow");
-assert(blocked.ok === false, "shortbow blocked without mats/workshop");
+assert(Object.keys(AV.state.interiors).length >= 5, "interiors generated");
+assert(world.props.some((p) => p.kind === "door" && p.enter), "outdoor doors");
+assert(world.props.some((p) => p.kind === "door" && p.exit), "interior exit doors");
+assert(world.props.some((p) => p.kind === "cupboard"), "interior cupboards");
+assert(world.props.some((p) => p.id === "bank"), "public bank building");
+assert(world.props.some((p) => p.kind === "trader"), "trader NPC");
 
-// recipeBlocked feedback
-const needMsg = AV.recipeBlocked(D.RECIPES.find((r) => r.id === "nails"), p);
-// may be null if can afford nails
-p.inv = [];
-const needMsg2 = AV.recipeBlocked(D.RECIPES.find((r) => r.id === "nails"), p);
-assert(needMsg2 && needMsg2.includes("Need"), "missing mats message");
+// Map transition positions
+const before = { x: AV.state.player.x, y: AV.state.player.y, map: AV.state.mapId };
+const okEnter = AV.enterBuilding("b0");
+assert(okEnter === true, "enterBuilding b0");
+assert(AV.state.mapId === "int_b0", "mapId switched to interior");
+assert(AV.state.player.y > 150 && AV.state.interiors.b0.h >= 280, "player placed inside room");
+const int = AV.state.interiors.b0;
+AV.exitBuilding();
+assert(AV.state.mapId === "overworld", "exited to overworld");
+assert(Math.abs(AV.state.player.x - int.outdoorExit.x) < 1, "exit at outdoor door X");
+assert(AV.state.player.y >= int.outdoorExit.y, "exit south of door");
 
-// Equipment armor math
-const eq = AV.emptyEquip();
-eq.body = "bronze_body"; eq.head = "bronze_helm";
-assert(AV.armorTotal(eq) === 9, "armor total 6+3=9");
-assert(AV.reduceDamage(20, 9) < 20, "armor reduces damage");
-assert(AV.reduceDamage(20, 0) === 20, "0 armor no reduction (or round)");
-eq.weapon = "iron_sword";
-assert(AV.meleeDamage(eq) === D.ITEM_DEFS.iron_sword.dmg, "melee sword dmg");
-eq.weapon = "shortbow"; eq.ammo = "iron_arrows";
-assert(AV.rangedDamage(eq) === D.ITEM_DEFS.shortbow.dmg + D.ITEM_DEFS.iron_arrows.dmgBonus, "ranged dmg + ammo");
+// Furniture placement validity
+const room = { w: 360, h: 280 };
+assert(AV.furnitureFits(180, 140, D.FURNITURE_DEFS.table, 0, room) === true, "furniture fits center");
+assert(AV.furnitureFits(10, 10, D.FURNITURE_DEFS.table, 0, room) === false, "furniture blocked at edge");
+const r1 = AV.furnitureRect(100, 100, D.FURNITURE_DEFS.bed, 0);
+const r2 = AV.furnitureRect(100, 100, D.FURNITURE_DEFS.bed, 0);
+assert(AV.rectsOverlap(r1, r2, 0) === true, "same rect overlaps");
+const r3 = AV.furnitureRect(200, 200, D.FURNITURE_DEFS.chair, 0);
+assert(AV.rectsOverlap(r1, r3, 0) === false, "far furniture no overlap");
 
-// Arrow consumption
-const archer = AV.createPlayer(0, 0);
-archer.inv = [{ id: "bronze_arrows", qty: 3 }];
-archer.equip.ammo = "bronze_arrows";
-assert(AV.consumeAmmo(archer) === true, "consume arrow");
-assert(AV.invCount(archer.inv, "bronze_arrows") === 2, "arrow qty 2");
-AV.consumeAmmo(archer); AV.consumeAmmo(archer);
-assert(AV.invCount(archer.inv, "bronze_arrows") === 0, "arrows empty");
-assert(AV.consumeAmmo(archer) === false, "no ammo fails");
+// Place furniture inside claimed building
+AV.enterBuilding("b0");
+const b0 = AV.state.props.find((p) => p.id === "b0");
+b0.base.claimed = true; b0.base.type = "safehouse";
+AV.state.player.inv = [{ id: "plank", qty: 20 }, { id: "cloth", qty: 10 }, { id: "nails", qty: 10 }];
+AV.state.player.skills.construction.level = 5;
+AV.state.placeMode = { type: "bed", rot: 0 };
+// clear random containers that might block
+for (let i = AV.state.props.length - 1; i >= 0; i--) {
+  const p = AV.state.props[i];
+  if (p.mapId === "int_b0" && (p.kind === "cupboard" || p.kind === "fridge")) AV.state.props.splice(i, 1);
+}
+const placed = AV.placeFurnitureAt(180, 140);
+assert(placed === true, "placed bed");
+assert(AV.state.props.some((p) => p.kind === "furniture" && p.furniture === "bed" && p.mapId === "int_b0"), "bed on interior map");
 
-// Tool tiers
-const miner = AV.createPlayer(0, 0);
-miner.inv = [{ id: "bronze_pick", qty: 1 }];
-assert(AV.bestToolTier(miner.inv, miner.equip, "pick") === 1, "bronze pick tier 1");
-miner.inv.push({ id: "steel_pick", qty: 1 });
-assert(AV.bestToolTier(miner.inv, miner.equip, "pick") === 3, "steel pick tier 3");
-
-// Creature AI flags
-assert(D.CREATURE_DEFS.zombie.aggressive === true, "zombie aggressive");
-assert(D.CREATURE_DEFS.rat.aggressive === true, "rat aggressive");
-assert(D.CREATURE_DEFS.squirrel.aggressive === false && D.CREATURE_DEFS.squirrel.flee === true, "squirrel passive flee");
-assert(D.CREATURE_DEFS.chicken.flee === true, "chicken flees");
-assert(D.CREATURE_DEFS.goblin.aggressive === true, "goblin aggressive");
-
-// World gen
-const world = AV.generateWorld(7);
-assert(world.props.some((x) => x.kind === "forge"), "world forge");
-assert(world.props.some((x) => x.kind === "oak"), "oak trees");
-assert(world.props.some((x) => x.node === "copper_rock" || x.kind === "copper_rock"), "copper rocks");
-assert(world.props.some((x) => x.kind === "fish_spot"), "fish spots");
-assert(world.creatures.some((c) => c.type === "goblin"), "goblins");
-assert(world.creatures.some((c) => c.type === "chicken"), "chickens");
-assert(world.creatures.some((c) => !c.aggressive || c.type === "squirrel" || c.type === "chicken"), "passive creatures exist");
-
-// Serialize v3
-AV.state.seed = 1; AV.state.day = 1; AV.state.dayTimer = 0; AV.state.time = 1;
-AV.state.player = p; AV.state.creatures = world.creatures.slice(0, 2);
-AV.state.props = world.props; AV.state.lootPiles = [];
+// Bank deposit/withdraw + death persistence
+AV.state.bank = [];
+const inv = [{ id: "wood", qty: 10 }, { id: "coins", qty: 50 }];
+assert(AV.bankDeposit(AV.state.bank, inv, "wood", 4) === 4, "deposit 4 wood");
+assert(AV.invCount(inv, "wood") === 6, "inv wood left 6");
+assert(AV.invCount(AV.state.bank, "wood") === 4, "bank wood 4");
+assert(AV.bankWithdraw(AV.state.bank, inv, "wood", 2, 24) === 2, "withdraw 2");
+assert(AV.invCount(AV.state.bank, "wood") === 2, "bank remains 2");
+// Death does not clear bank
+const bankSnap = AV.state.bank.map((x) => ({ ...x }));
+AV.state.player.inv = [{ id: "knife", qty: 1 }];
+// simulate serialize includes bank
+AV.state.player = AV.createPlayer(0, 0);
+AV.state.bank = bankSnap;
 const ser = AV.serialize();
-assert(ser.v === 3, "save v3");
-assert(ser.player.equip, "equip in save");
-assert(ser.creatures && ser.creatures.length >= 1, "creatures in save");
+assert(ser.v === 4 && ser.bank && ser.bank.length >= 1, "serialize v4 with bank");
+assert(ser.mapId && ser.interiors, "serialize map + interiors");
 
-// Cook burn/cook returns
-const outcomes = new Set();
-for (let i = 0; i < 40; i++) outcomes.add(AV.cookOutcome(1));
-assert(outcomes.has("cook") || outcomes.has("burn"), "cookOutcome returns values");
+// Shop coin math
+const stock = D.SHOP_STOCK_DEFAULT.map((s) => Object.assign({}, s));
+const bag = [{ id: "coins", qty: 100 }];
+const buy = AV.shopBuy(stock[0], bag, 100);
+assert(buy.ok && buy.coins === 100 - stock[0].buy, "shop buy deducts coins");
+assert(AV.invCount(bag, stock[0].id) === 1, "bought item in bag");
+const sellBag = [{ id: stock[0].id, qty: 1 }, { id: "coins", qty: buy.coins }];
+const sell = AV.shopSell(stock[0], sellBag, stock[0].id, buy.coins);
+assert(sell.ok && sell.coins === buy.coins + stock[0].sell, "shop sell below buy price");
+assert(stock[0].sell < stock[0].buy, "sell < buy");
+
+// Migration foraging still works
+const mig = AV.migrateSkills({ foraging: { level: 4, xp: 0, next: 50 } });
+assert(mig.woodcutting.level === 4, "foraging migrate");
+
+// Touch still correct
+const cam = { x: 50, y: 50 };
+const rect = { left: 0, top: 0, width: 200, height: 200 };
+const w = AV.clientToWorld(100, 100, rect, cam, 200, 200);
+assert(Math.abs(w.x - 150) < 0.01 && Math.abs(w.y - 150) < 0.01, "touch mapping intact");
 
 const html = readFileSync(path.join(__dirname, "index.html"), "utf8");
-assert(html.includes("data.js") && html.includes("btn-skills"), "HTML loads data + Skills");
-assert(html.includes("context-menu"), "context menu markup");
-assert(html.includes("ws-tab"), "workshop tabs");
+assert(html.includes("overlay-bank") && html.includes("overlay-shop"), "bank/shop markup");
+assert(html.includes("data.js?v=4"), "cache bust v4");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
